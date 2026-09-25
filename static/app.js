@@ -43,9 +43,31 @@ async function admin(){let o=await api('/api/admin/overview');shell('Админ-
 async function adminStudents(){let d=await api('/api/admin/students');shell('Студенты в журнале',d.students.map(x=>`<div class="studentrow"><span>${esc(x.full_name)}</span><label><input type="checkbox" ${x.include_in_journal?'checked':''} onchange="toggleStudent(${x.id},this.checked)"> журнал</label></div>`).join(''))}
 async function toggleStudent(id,v){await api('/api/admin/students/'+id+'/toggle',{method:'POST',body:JSON.stringify({include_in_journal:v})})}
 async function adminGrades(){let ds=await api('/api/disciplines');shell('Журнал оценок',ds.disciplines.map(d=>`<button class="rowbtn" onclick="gradeBook(${d.id})"><span>${d.emoji} ${esc(d.name)}</span><b>→</b></button>`).join(''))}
-async function gradeBook(id){let d=await api('/api/admin/grades/'+id);let heads=d.columns.map(x=>`<th>${ruDate(x)}</th>`).join('');let rows=d.students.map(s=>`<tr><th>${esc(s.full_name)}</th>${d.columns.map(md=>{let c=s.cells[md];return `<td><button class="cellmark" onclick="setCell(${s.id},${id},'${md}',${c?`'${esc(c.value)}'`:'null'})">${c?esc(c.value):'·'}</button></td>`}).join('')}<td class="avgcell"><b>${avg(s.stats.average)}</b><small>Н${s.stats.missed} Б${s.stats.sick} О${s.stats.late}</small></td></tr>`).join('');shell(`Журнал · ${esc(d.discipline.name)}`,`${card(`<div class="booktools"><button onclick="addColumn(${id})">➕ Добавить столбик</button><span>Н/Б/О не входят в среднее</span></div>`)}<div class="tablewrap"><table class="gradebook"><thead><tr><th>Фамилия и Имя</th>${heads}<th>Среднее</th></tr></thead><tbody>${rows}</tbody></table></div>`)}
-async function addColumn(id){let v=prompt('Дата нового столбика (ДД.ММ.ГГГГ):');if(!v)return;let p=v.split('.');if(p.length!==3)return alert('Формат: ДД.ММ.ГГГГ');let md=`${p[2]}-${p[1].padStart(2,'0')}-${p[0].padStart(2,'0')}`;try{await api('/api/admin/grades/'+id+'/columns',{method:'POST',body:JSON.stringify({date:md})});await gradeBook(id)}catch(e){alert('Неверная дата')}}
-async function setCell(sid,did,md,current){let v=prompt('Оценка: 2, 3, 4, 5, Н, Б или О. Пусто — удалить/очистить.',current&&current!=='null'?current:'');if(v===null)return;v=v.trim().toUpperCase();if(!['','2','3','4','5','Н','Б','О'].includes(v))return alert('Допустимо: 2, 3, 4, 5, Н, Б, О');if(!v){await api('/api/admin/grades',{method:'POST',body:JSON.stringify({student_id:sid,discipline_id:did,value:'',mark_date:md})}).catch(()=>{});return await gradeBook(did)}await api('/api/admin/grades',{method:'POST',body:JSON.stringify({student_id:sid,discipline_id:did,value:v,mark_date:md})});await gradeBook(did)}
+async function gradeBook(id){
+  let d=await api('/api/admin/grades/'+id);
+  let heads=d.columns.map(md=>`<th class="datehead"><span>${ruDate(md)}</span></th>`).join('');
+  let rows=d.students.map(s=>`<tr>
+    <th class="namecell">${esc(s.full_name)}</th>
+    ${d.columns.map(md=>{let c=s.cells[md];let val=c?String(c.value):'';return `<td class="markcell"><select onchange="setCell(${s.id},${id},'${md}',this.value)" aria-label="${esc(s.full_name)} ${ruDate(md)}"><option value="" ${!val?'selected':''}>·</option><option value="2" ${val==='2'?'selected':''}>2</option><option value="3" ${val==='3'?'selected':''}>3</option><option value="4" ${val==='4'?'selected':''}>4</option><option value="5" ${val==='5'?'selected':''}>5</option><option value="Н" ${val==='Н'?'selected':''}>Н</option><option value="Б" ${val==='Б'?'selected':''}>Б</option><option value="О" ${val==='О'?'selected':''}>О</option></select></td>`}).join('')}
+    <td class="avgcell"><b>${avg(s.stats.average)}</b></td>
+  </tr>`).join('');
+  shell(`Журнал · ${esc(d.discipline.name)}`,`<div class="booktools"><button class="excelbtn" onclick="addColumn(${id})">➕ Добавить дату</button><span>2–5 — среднее · Н/Б/О не учитываются</span></div><div class="tablewrap"><table class="gradebook"><thead><tr><th class="namehead">Фамилия и Имя</th>${heads}<th>Среднее</th></tr></thead><tbody>${rows}</tbody></table></div>`)
+}
+async function addColumn(id){
+  let v=prompt('Введите дату столбца в формате ДД.ММ.ГГГГ');
+  if(!v)return;
+  v=v.trim();
+  let md='';
+  if(/^\d{4}-\d{2}-\d{2}$/.test(v)) md=v;
+  else if(/^\d{2}\.\d{2}\.\d{4}$/.test(v)){let [dd,mm,yyyy]=v.split('.');md=`${yyyy}-${mm}-${dd}`;}
+  else return alert('Неверная дата. Пример: 25.09.2026');
+  try{await api('/api/admin/grades/'+id+'/columns',{method:'POST',body:JSON.stringify({date:md})});await gradeBook(id)}catch(e){alert('Не удалось добавить дату: '+e.message)}
+}
+async function setCell(sid,did,md,v){
+  v=(v||'').trim().toUpperCase();
+  if(!['','2','3','4','5','Н','Б','О'].includes(v))return alert('Допустимо: 2, 3, 4, 5, Н, Б, О');
+  try{await api('/api/admin/grades',{method:'POST',body:JSON.stringify({student_id:sid,discipline_id:did,value:v,mark_date:md})});await gradeBook(did)}catch(e){alert('Не удалось сохранить: '+e.message)}
+}
 async function adminSchedule(){let d=iso(new Date());let x=await api('/api/admin/schedule?date='+d);let ds=await api('/api/disciplines');shell('Редактор расписания',`${card(`<div class="calnav"><button onclick="adminScheduleShift(-1)">‹</button><div><b>${ruDate(d)}</b><small>Выберите дату</small></div><button onclick="adminScheduleShift(1)">›</button></div><input id="admDate" class="dateinput" type="date" value="${d}" onchange="adminSchedulePick(this.value)">`)}<div id="scheduleEditor">${x.lessons.map(l=>`<div class="editlesson"><b>${l.lesson_no}</b><input value="${l.start}" data-k="start"><input value="${l.end}" data-k="end"><select data-k="discipline_id">${ds.disciplines.map(z=>`<option value="${z.id}" ${z.id==l.discipline_id?'selected':''}>${esc(z.name)}</option>`).join('')}</select><input value="${esc(l.room)}" data-k="room"><input value="${esc(l.lesson_type)}" data-k="lesson_type"></div>`).join('')||card('На этот день пар нет.')}</div><button class="wide" onclick="saveSchedule('${d}')">💾 Сохранить</button>`)}
 let admDate=iso(new Date());
 function adminScheduleShift(n){let d=new Date(admDate+'T12:00:00');d.setDate(d.getDate()+n);admDate=iso(d);adminSchedule()}
