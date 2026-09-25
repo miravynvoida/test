@@ -16,7 +16,7 @@ from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery, FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import CallbackQuery, FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup, Message, WebAppInfo
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
@@ -33,6 +33,7 @@ VERSION = os.getenv("BOT_VERSION", "2.1.1")
 HELP_USERNAME = os.getenv("HELP_USERNAME", "@miravynvoida")
 TOKEN = os.getenv("BOT_TOKEN", "")
 ADMIN_IDS = {int(x.strip()) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip().isdigit()}
+MINI_APP_URL = os.getenv("MINI_APP_URL", "").strip()
 
 if not TOKEN:
     raise RuntimeError("BOT_TOKEN is empty")
@@ -153,11 +154,14 @@ async def edit_or_answer(call, text, markup=None):
 
 
 def main_kb():
-    return ik([
+    rows = [
         [b("📅 Расписание","menu:schedule"), b("📝 Домашнее задание","menu:hw")],
         [b("📚 Учебники","menu:books"), b("⚙️ Настройки","menu:settings")],
-        [b("👤 Личный кабинет","menu:soon")], [b("❓ Помощь","menu:help")]
-    ])
+    ]
+    if MINI_APP_URL:
+        rows.append([InlineKeyboardButton(text="📱 Электронный дневник", web_app=WebAppInfo(url=MINI_APP_URL))])
+    rows += [[b("👤 Личный кабинет","menu:soon")], [b("❓ Помощь","menu:help")]]
+    return ik(rows)
 
 async def main_menu(bot, uid, name=None):
     student = is_auth(uid)

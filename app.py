@@ -1,11 +1,16 @@
-import os, hmac, hashlib, json, sqlite3, urllib.parse
+import os, hmac, hashlib, json, sqlite3, urllib.parse, asyncio
 from datetime import datetime, date, timedelta
 from pathlib import Path
 
 from aiohttp import web
+from dotenv import load_dotenv
+
+load_dotenv()
 
 BASE = Path(__file__).resolve().parent
-DB_PATH = os.getenv("DB_PATH", str(BASE / "data" / "bot.db"))
+DB_PATH = Path(os.getenv("DB_PATH", str(BASE / "data" / "bot.db")))
+if not DB_PATH.is_absolute():
+    DB_PATH = BASE / DB_PATH
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 ADMIN_IDS = {int(x.strip()) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip().isdigit()}
 DEV_MODE = os.getenv("DEV_MODE", "0") == "1"
@@ -313,5 +318,33 @@ migrate()
 app=web.Application(middlewares=[auth_middleware])
 app.add_routes(routes)
 
+async def run_bot():
+    # Запускаем существующий aiogram-бот в том же asyncio-процессе,
+    # чтобы Bothost мог обслуживать и Telegram-бота, и Mini App одним сервисом.
+    from bot_main import Bot, Dispatcher, DefaultBotProperties, ParseMode, AsyncIOScheduler
+    from bot_main import TOKEN, router as bot_router, notification_job, TZ, migrate as bot_migrate
+
+    bot_migrate()
+    bot = Bot(TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    dp = Dispatcher()
+    dp.include_router(bot_router)
+    scheduler = AsyncIOScheduler(timezone=TZ)
+    scheduler.add_job(notification_job, 'interval', args=[bot], minutes=1, coalesce=True, max_instances=1)
+    scheduler.start()
+    try:
+        await dp.start_polling(bot)
+    finally:
+        scheduler.shutdown()
+        await bot.session.close()
+
+async def start_all():
+    migrate()
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, host=os.getenv("HOST", "0.0.0.0"), port=int(os.getenv("PORT", "3000")))
+    await site.start()
+    print(f"Mini App started on {os.getenv('HOST', '0.0.0.0')}:{os.getenv('PORT', '3000')}")
+    await run_bot()
+
 if __name__=="__main__":
-    web.run_app(app, host=os.getenv("HOST","0.0.0.0"), port=int(os.getenv("PORT","8080")))
+    asyncio.run(start_all())
