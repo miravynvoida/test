@@ -391,6 +391,7 @@ routes=[
     web.get("/api/disciplines",api_disciplines),
     web.get("/api/schedule",api_schedule),
     web.get("/api/homework",api_homework),
+    web.post("/api/homework/{homework_id}/material",api_homework_material),
     web.get("/api/grades",api_grades),
     web.get("/api/grades/{discipline_id}",api_grade_detail),
     web.get("/api/events",api_events),
