@@ -31,6 +31,7 @@ if not DB_PATH.is_absolute():
 TZ = ZoneInfo(os.getenv("TIMEZONE", "Europe/Moscow"))
 VERSION = os.getenv("BOT_VERSION", "2.1.1")
 HELP_USERNAME = os.getenv("HELP_USERNAME", "@miravynvoida")
+MINI_APP_URL = os.getenv("MINI_APP_URL", "https://r261.bothost.tech/static/index.html")
 TOKEN = os.getenv("BOT_TOKEN", "")
 ADMIN_IDS = {int(x.strip()) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip().isdigit()}
 
