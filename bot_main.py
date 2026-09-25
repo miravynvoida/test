@@ -33,7 +33,6 @@ VERSION = os.getenv("BOT_VERSION", "2.1.1")
 HELP_USERNAME = os.getenv("HELP_USERNAME", "@miravynvoida")
 TOKEN = os.getenv("BOT_TOKEN", "")
 ADMIN_IDS = {int(x.strip()) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip().isdigit()}
-MINI_APP_URL = os.getenv("MINI_APP_URL", "").strip()
 
 if not TOKEN:
     raise RuntimeError("BOT_TOKEN is empty")
@@ -530,7 +529,11 @@ async def newhw_publish(c,state):
     # title is stored as the first line so old schema stays intact
     cur.execute("INSERT INTO homework_extra(homework_id,title) VALUES(?,?)",(hid,data['title']))
     for kind,fid,caption in data.get('media',[]): cur.execute("INSERT INTO homework_media(homework_id,kind,file_id,caption) VALUES(?,?,?,?)",(hid,kind,fid,caption))
-    cc.commit();cc.close();await state.clear();await c.answer("Опубликовано!");await show(c.bot,c.from_user.id,"✅ ДЗ опубликовано.\n\n📢 Авторизованные пользователи получат уведомление «📝 Новое ДЗ».",admin_kb());await broadcast_new_hw(c.bot,hid)
+    cc.commit();cc.close()
+    try:
+        ev=db(); ev.execute("INSERT INTO mini_events(event_type,title,body,created_at) VALUES(?,?,?,?)",("homework","Новое ДЗ",f"{data['title']} · до {data['due']}",datetime.now(TZ).isoformat())); ev.commit(); ev.close()
+    except Exception: pass
+    await state.clear();await c.answer("Опубликовано!");await show(c.bot,c.from_user.id,"✅ ДЗ опубликовано.\n\n📢 Авторизованные пользователи получат уведомление «📝 Новое ДЗ».",admin_kb());await broadcast_new_hw(c.bot,hid)
 
 async def broadcast_new_hw(bot,hid):
     cc=db(); h=cc.execute("SELECT h.*,d.name discipline,d.emoji FROM homework h JOIN disciplines d ON d.id=h.discipline_id WHERE h.id=?",(hid,)).fetchone(); ex=cc.execute("SELECT title FROM homework_extra WHERE homework_id=?",(hid,)).fetchone(); users=cc.execute("SELECT telegram_id FROM students WHERE telegram_id IS NOT NULL").fetchall(); cc.close()

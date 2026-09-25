@@ -69,6 +69,15 @@ def migrate():
         FOREIGN KEY(discipline_id) REFERENCES disciplines(id) ON DELETE CASCADE
     );
     CREATE INDEX IF NOT EXISTS idx_marks_student_disc_date ON marks(student_id, discipline_id, mark_date);
+    CREATE TABLE IF NOT EXISTS journal_columns (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        discipline_id INTEGER NOT NULL,
+        column_date TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        UNIQUE(discipline_id, column_date),
+        FOREIGN KEY(discipline_id) REFERENCES disciplines(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_journal_columns_disc ON journal_columns(discipline_id, column_date);
     CREATE TABLE IF NOT EXISTS mini_events (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         event_type TEXT NOT NULL,
@@ -238,9 +247,29 @@ async def api_events(request):
     s=request["student"]["id"]
     c=db()
     rows=c.execute("""SELECT id,event_type,title,body,created_at FROM mini_events
-        WHERE student_id IS NULL OR student_id=? ORDER BY created_at DESC LIMIT 50""",(s,)).fetchall()
+        WHERE student_id=? OR (student_id IS NULL AND event_type IN ('schedule','homework','system'))
+        ORDER BY created_at DESC LIMIT 50""",(s,)).fetchall()
     c.close()
     return web.json_response({"events":[dict(x) for x in rows]})
+
+async def api_homework_material(request):
+    hid=int(request.match_info['homework_id']); uid=int(request['student']['telegram_id'])
+    c=db(); media=c.execute("SELECT kind,file_id,caption FROM homework_media WHERE homework_id=? ORDER BY id",(hid,)).fetchall(); h=c.execute("SELECT id FROM homework WHERE id=? AND hidden=0 AND archived=0",(hid,)).fetchone(); c.close()
+    if not h: raise web.HTTPNotFound()
+    if not media: return web.json_response({'ok':False,'message':'У этого задания нет прикреплённых материалов.'})
+    if not BOT_TOKEN: raise web.HTTPInternalServerError(text='BOT_TOKEN не настроен')
+    import aiohttp
+    sent=0
+    async with aiohttp.ClientSession() as session:
+        for x in media:
+            if x['kind']=='photo': method='sendPhoto'; field='photo'
+            elif x['kind']=='video': method='sendVideo'; field='video'
+            else: method='sendDocument'; field='document'
+            payload={'chat_id':str(uid),field:x['file_id']}
+            if x['caption']: payload['caption']=x['caption']
+            async with session.post(f'https://api.telegram.org/bot{BOT_TOKEN}/{method}',json=payload) as resp:
+                if resp.status==200: sent+=1
+    return web.json_response({'ok':sent>0,'sent':sent})
 
 def require_admin(request):
     if not request["is_admin"]: raise web.HTTPForbidden(text="Только для администраторов")
@@ -265,40 +294,59 @@ async def api_admin_students_toggle(request):
 
 async def api_admin_grade_book(request):
     require_admin(request)
-    did=int(request.match_info["discipline_id"])
-    start=request.query.get("start"); end=request.query.get("end")
+    did=int(request.match_info['discipline_id'])
     c=db()
     ds=c.execute("SELECT id,name,emoji FROM disciplines WHERE id=?",(did,)).fetchone()
     students=c.execute("""SELECT s.id,s.full_name,COALESCE(js.include_in_journal,1) include_in_journal
         FROM students s LEFT JOIN journal_settings js ON js.student_id=s.id
         WHERE COALESCE(js.include_in_journal,1)=1 ORDER BY s.full_name""").fetchall()
+    columns=c.execute("SELECT column_date FROM journal_columns WHERE discipline_id=? ORDER BY column_date",(did,)).fetchall()
     marks={}
-    q="""SELECT student_id,value,mark_date,lesson_no FROM marks WHERE discipline_id=?"""
-    args=[did]
-    if start: q+=" AND mark_date>=?"; args.append(start)
-    if end: q+=" AND mark_date<=?"; args.append(end)
-    for r in c.execute(q,args).fetchall(): marks.setdefault(r["student_id"],[]).append(dict(r))
+    for r in c.execute("SELECT student_id,value,mark_date,lesson_no FROM marks WHERE discipline_id=? ORDER BY mark_date,id",(did,)).fetchall():
+        marks.setdefault(r['student_id'],{}).setdefault(r['mark_date'],[]).append(dict(r))
     c.close()
+    cols=[r['column_date'] for r in columns]
+    # Existing marks automatically become journal columns, so old data is visible immediately.
+    for bydate in marks.values():
+        for md in bydate:
+            if md not in cols: cols.append(md)
+    cols.sort()
     data=[]
-    for s in students:
-        r=marks.get(s["id"],[])
-        data.append({**dict(s),"marks":r,"stats":mark_stats(r)})
-    return web.json_response({"discipline":dict(ds) if ds else None,"students":data})
+    for st in students:
+        bydate=marks.get(st['id'],{})
+        flat=[x for arr in bydate.values() for x in arr]
+        data.append({**dict(st),'cells':{md:(bydate.get(md,[])[:1] or [None])[0] for md in cols},'stats':mark_stats(flat)})
+    return web.json_response({'discipline':dict(ds) if ds else None,'columns':cols,'students':data})
+
+async def api_admin_grade_column(request):
+    require_admin(request)
+    did=int(request.match_info['discipline_id']); data=await request.json()
+    md=str(data.get('date','')).strip()
+    try: datetime.strptime(md,'%Y-%m-%d')
+    except ValueError: raise web.HTTPBadRequest(text='Дата должна быть в формате YYYY-MM-DD')
+    c=db(); c.execute('INSERT OR IGNORE INTO journal_columns(discipline_id,column_date,created_at) VALUES(?,?,?)',(did,md,nowstr())); c.commit(); c.close()
+    return web.json_response({'ok':True,'date':md})
 
 async def api_admin_add_mark(request):
     require_admin(request)
     data=await request.json()
-    sid=int(data["student_id"]); did=int(data["discipline_id"]); value=str(data["value"]).strip().upper()
-    if value not in {"2","3","4","5","Н","Б","О"}: raise web.HTTPBadRequest(text="Недопустимая отметка")
-    md=data.get("mark_date") or date.today().isoformat()
+    sid=int(data['student_id']); did=int(data['discipline_id']); value=str(data['value']).strip().upper()
+    if value not in {'2','3','4','5','Н','Б','О'}: raise web.HTTPBadRequest(text='Недопустимая отметка')
+    md=data.get('mark_date') or date.today().isoformat()
+    try: datetime.strptime(md,'%Y-%m-%d')
+    except ValueError: raise web.HTTPBadRequest(text='Неверная дата')
     c=db()
-    c.execute("""INSERT INTO marks(student_id,discipline_id,value,mark_date,lesson_no,comment,created_at)
-                 VALUES(?,?,?,?,?,?,?)""",(sid,did,value,md,data.get("lesson_no"),data.get("comment",""),nowstr()))
+    c.execute('INSERT OR IGNORE INTO journal_columns(discipline_id,column_date,created_at) VALUES(?,?,?)',(did,md,nowstr()))
+    old=c.execute('SELECT id FROM marks WHERE student_id=? AND discipline_id=? AND mark_date=? ORDER BY id DESC LIMIT 1',(sid,did,md)).fetchone()
+    if old:
+        c.execute('UPDATE marks SET value=?,comment=?,created_at=? WHERE id=?',(value,data.get('comment',''),nowstr(),old['id']))
+    else:
+        c.execute('INSERT INTO marks(student_id,discipline_id,value,mark_date,lesson_no,comment,created_at) VALUES(?,?,?,?,?,?,?)',(sid,did,value,md,data.get('lesson_no'),data.get('comment',''),nowstr()))
+    name=c.execute('SELECT full_name FROM students WHERE id=?',(sid,)).fetchone()
+    dn=c.execute('SELECT name FROM disciplines WHERE id=?',(did,)).fetchone()
+    c.execute('INSERT INTO mini_events(event_type,title,body,student_id,created_at) VALUES(?,?,?,?,?)',('grade',f'Новая отметка: {dn["name"]}',f'{value} · {md}',sid,nowstr()))
     c.commit(); c.close()
-    c=db(); name=c.execute("SELECT full_name FROM students WHERE id=?",(sid,)).fetchone(); dn=c.execute("SELECT name FROM disciplines WHERE id=?",(did,)).fetchone(); c.close()
-    c=db(); c.execute("INSERT INTO mini_events(event_type,title,body,created_at) VALUES(?,?,?,?)",
-                      ("grade",f"Новая отметка: {dn['name']}",f"{name['full_name']} — {value}",nowstr())); c.commit(); c.close()
-    return web.json_response({"ok":True})
+    return web.json_response({'ok':True})
 
 async def api_admin_schedule_day(request):
     require_admin(request)
