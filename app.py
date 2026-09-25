@@ -13,23 +13,28 @@ if not DB_PATH.is_absolute():
     DB_PATH = BASE / DB_PATH
 
 def ensure_base_database():
-    """For the test deployment, seed the persistent DB from the bundled copy
-    if the target database is missing the bot's base schema."""
+    """Ensure Bothost's persistent DB starts from the supplied test database.
+    The bundled seed is kept separate from the persistent DB so a pre-created
+    empty SQLite file cannot hide the real schema.
+    """
+    import shutil
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    bundled = BASE / "data" / "bot.db"
-    if not bundled.exists() or bundled.resolve() == DB_PATH.resolve():
-        return
+    seed = BASE / "seed.db"
+    if not seed.exists():
+        raise RuntimeError("seed.db is missing from the deployment package")
     try:
         conn = sqlite3.connect(DB_PATH)
-        has_students = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='students'").fetchone()
+        has_students = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='students'"
+        ).fetchone()
         conn.close()
     except sqlite3.Error:
         has_students = None
     if not has_students:
-        import shutil
         if DB_PATH.exists():
             DB_PATH.unlink()
-        shutil.copy2(bundled, DB_PATH)
+        shutil.copy2(seed, DB_PATH)
+        print(f"Seed database copied to {DB_PATH}")
 
 ensure_base_database()
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
@@ -101,6 +106,16 @@ def verify_init_data(init_data: str):
         return None
 
 @web.middleware
+async def access_log_middleware(request, handler):
+    try:
+        response = await handler(request)
+        print(f"HTTP {request.method} {request.path} -> {response.status}")
+        return response
+    except Exception as exc:
+        print(f"HTTP {request.method} {request.path} -> ERROR {type(exc).__name__}: {exc}")
+        raise
+
+@web.middleware
 async def auth_middleware(request, handler):
     if request.path.startswith("/api/"):
         init_data = request.headers.get("X-Telegram-Init-Data", "")
@@ -147,6 +162,9 @@ def mark_stats(rows):
         "late": sum(x["value"]=="О" for x in rows),
         "total_attendance_events": sum(x["value"] in {"Н","Б","О"} for x in rows)
     }
+
+async def health(request):
+    return web.json_response({"status": "ok", "service": "r261-mini-app"})
 
 async def index(request):
     return web.FileResponse(BASE/"static/index.html")
@@ -319,6 +337,7 @@ async def api_admin_overview(request):
 
 routes=[
     web.get("/",index),
+    web.get("/health",health),
     web.get("/static/{name}",static_file),
     web.get("/api/me",api_me),
     web.get("/api/disciplines",api_disciplines),
@@ -336,7 +355,7 @@ routes=[
     web.get("/api/admin/overview",api_admin_overview),
 ]
 
-app=web.Application(middlewares=[auth_middleware])
+app=web.Application(middlewares=[access_log_middleware, auth_middleware])
 app.add_routes(routes)
 
 async def run_bot():
