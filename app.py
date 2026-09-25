@@ -330,14 +330,17 @@ async def api_admin_grade_column(request):
 async def api_admin_add_mark(request):
     require_admin(request)
     data=await request.json()
-    sid=int(data['student_id']); did=int(data['discipline_id']); value=str(data['value']).strip().upper()
-    if value not in {'2','3','4','5','Н','Б','О'}: raise web.HTTPBadRequest(text='Недопустимая отметка')
+    sid=int(data['student_id']); did=int(data['discipline_id']); value=str(data.get('value','')).strip().upper()
+    if value not in {'','2','3','4','5','Н','Б','О'}: raise web.HTTPBadRequest(text='Недопустимая отметка')
     md=data.get('mark_date') or date.today().isoformat()
     try: datetime.strptime(md,'%Y-%m-%d')
-    except ValueError: raise web.HTTPBadRequest(text='Неверная дата')
+    except ValueError: raise web.HTTPBadRequest(text='Неверная дата. Используйте YYYY-MM-DD')
     c=db()
-    c.execute('INSERT OR IGNORE INTO journal_columns(discipline_id,column_date,created_at) VALUES(?,?,?)',(did,md,nowstr()))
     old=c.execute('SELECT id FROM marks WHERE student_id=? AND discipline_id=? AND mark_date=? ORDER BY id DESC LIMIT 1',(sid,did,md)).fetchone()
+    if not value:
+        if old: c.execute('DELETE FROM marks WHERE id=?',(old['id'],))
+        c.commit(); c.close(); return web.json_response({'ok':True,'deleted':bool(old)})
+    c.execute('INSERT OR IGNORE INTO journal_columns(discipline_id,column_date,created_at) VALUES(?,?,?)',(did,md,nowstr()))
     if old:
         c.execute('UPDATE marks SET value=?,comment=?,created_at=? WHERE id=?',(value,data.get('comment',''),nowstr(),old['id']))
     else:
