@@ -11,6 +11,27 @@ BASE = Path(__file__).resolve().parent
 DB_PATH = Path(os.getenv("DB_PATH", str(BASE / "data" / "bot.db")))
 if not DB_PATH.is_absolute():
     DB_PATH = BASE / DB_PATH
+
+def ensure_base_database():
+    """For the test deployment, seed the persistent DB from the bundled copy
+    if the target database is missing the bot's base schema."""
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    bundled = BASE / "data" / "bot.db"
+    if not bundled.exists() or bundled.resolve() == DB_PATH.resolve():
+        return
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        has_students = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='students'").fetchone()
+        conn.close()
+    except sqlite3.Error:
+        has_students = None
+    if not has_students:
+        import shutil
+        if DB_PATH.exists():
+            DB_PATH.unlink()
+        shutil.copy2(bundled, DB_PATH)
+
+ensure_base_database()
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 ADMIN_IDS = {int(x.strip()) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip().isdigit()}
 DEV_MODE = os.getenv("DEV_MODE", "0") == "1"
@@ -53,8 +74,9 @@ def migrate():
         FOREIGN KEY(student_id) REFERENCES students(id) ON DELETE CASCADE
     );
     """)
-    c.execute("""INSERT OR IGNORE INTO journal_settings(student_id, include_in_journal)
-                 SELECT id, 1 FROM students""")
+    if c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='students'").fetchone():
+        c.execute("""INSERT OR IGNORE INTO journal_settings(student_id, include_in_journal)
+                     SELECT id, 1 FROM students""")
     c.commit(); c.close()
 
 def verify_init_data(init_data: str):
@@ -314,7 +336,6 @@ routes=[
     web.get("/api/admin/overview",api_admin_overview),
 ]
 
-migrate()
 app=web.Application(middlewares=[auth_middleware])
 app.add_routes(routes)
 
@@ -338,6 +359,10 @@ async def run_bot():
         await bot.session.close()
 
 async def start_all():
+    # Сначала запускаем миграцию основной БД бота: Mini App использует
+    # те же таблицы students/disciplines/schedule/homework и т.д.
+    from bot_main import migrate as bot_migrate
+    bot_migrate()
     migrate()
     runner = web.AppRunner(app)
     await runner.setup()
