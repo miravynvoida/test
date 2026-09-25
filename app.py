@@ -402,6 +402,7 @@ routes=[
     web.post("/api/admin/students/{student_id}/toggle",api_admin_students_toggle),
     web.get("/api/admin/grades/{discipline_id}",api_admin_grade_book),
     web.post("/api/admin/grades",api_admin_add_mark),
+    web.post("/api/admin/grades/{discipline_id}/columns",api_admin_grade_column),
     web.get("/api/admin/schedule",api_admin_schedule_day),
     web.post("/api/admin/schedule",api_admin_schedule_save),
     web.get("/api/admin/overview",api_admin_overview),
