@@ -21,7 +21,18 @@ function shiftSchedule(n){scheduleDate=new Date(scheduleDate);scheduleDate.setDa
 function pickSchedule(v){scheduleDate=new Date(v+'T12:00:00');schedule()}
 function scheduleToday(){scheduleDate=new Date();schedule()}
 async function hw(){let d=await api('/api/homework');let groups={};d.items.forEach(x=>(groups[x.discipline_id]??=[]).push(x));let html=Object.values(groups).map(items=>{let x=items[0];return card(`<button class="rowbtn" onclick="hwDisc(${x.discipline_id})"><span>${x.emoji} ${esc(x.discipline)}</span><b>${items.length}</b><small>Заданий: ${items.length}</small></button>`)}).join('');shell('Домашнее задание',html||card('Домашних заданий нет.'))}
-async function hwDisc(id){let d=await api('/api/homework');let items=d.items.filter(x=>x.discipline_id==id);let x=items[0];shell(`${x?.emoji||'📝'} ${esc(x?.discipline||'Дисциплина')}`,items.map(h=>card(`<div class="muted">до ${esc(h.due_date)} · опубликовано ${esc(h.published_date)}</div><h3>${esc(h.title||h.text.slice(0,70))}</h3><p>${esc(h.text).replace(/\n/g,'<br>')}</p>${h.explanation?`<div class="note">${esc(h.explanation)}</div>`:''}<button class="wide" onclick="sendMaterial(${h.id)}">📎 Показать материал</button>`)).join('')||card('Заданий нет.'))}
+async function hwDisc(id){
+  let d=await api('/api/homework');
+  let items=d.items.filter(x=>x.discipline_id==id);
+  let x=items[0];
+  let body=items.map(h=>{
+    let title=h.title||((h.text||'').slice(0,70));
+    let task=esc(h.text||'').replace(/\n/g,'<br>');
+    let explanation=h.explanation?`<div class="note">${esc(h.explanation)}</div>`:'';
+    return card(`<div class="muted">до ${esc(h.due_date)} · опубликовано ${esc(h.published_date)}</div><h3>${esc(title)}</h3><p>${task}</p>${explanation}<button class="wide" onclick="sendMaterial(${h.id})">📎 Показать материал</button>`);
+  }).join('');
+  shell(`${x?.emoji||'📝'} ${esc(x?.discipline||'Дисциплина')}`,body||card('Заданий нет.'));
+}
 async function sendMaterial(id){try{let r=await api('/api/homework/'+id+'/material',{method:'POST'});alert(r.ok?`Материал отправлен в Telegram (${r.sent}).`:(r.message||'Материалов нет.'));}catch(e){alert('Не удалось отправить материал.')}}
 async function grades(){let q=gradePeriod?`?start=${iso(new Date(Date.now()-gradePeriod*864e5))}&end=${iso(new Date())}`:'';let d=await api('/api/grades'+q);shell('Мои оценки',`${card(`<div class="big">${avg(d.overall.average)}</div><div class="muted">${d.overall.count} оценок · Н ${d.overall.missed} · Б ${d.overall.sick} · О ${d.overall.late}</div>`)}<div class="filter"><button onclick="setGradePeriod(30)">30 дней</button><button onclick="setGradePeriod(90)">90 дней</button><button onclick="setGradePeriod(0)">Весь период</button></div>`+d.disciplines.map(x=>`<button class="rowbtn" onclick="gradeDetail(${x.id})"><span>${x.emoji} ${esc(x.name)}</span><b>${avg(x.average)}</b><small>Н ${x.missed} · Б ${x.sick} · О ${x.late}</small></button>`).join(''))}
 function setGradePeriod(n){gradePeriod=n;grades()}
