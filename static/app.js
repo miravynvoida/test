@@ -48,19 +48,21 @@ async function gradeBook(id){
   let heads=d.columns.map(md=>`<th class="datehead"><span>${ruDate(md)}</span></th>`).join('');
   let rows=d.students.map(s=>`<tr>
     <th class="namecell">${esc(s.full_name)}</th>
-    ${d.columns.map(md=>{let c=s.cells[md];let val=c?String(c.value):'';return `<td class="markcell"><select onchange="setCell(${s.id},${id},'${md}',this.value)" aria-label="${esc(s.full_name)} ${ruDate(md)}"><option value="" ${!val?'selected':''}>·</option><option value="2" ${val==='2'?'selected':''}>2</option><option value="3" ${val==='3'?'selected':''}>3</option><option value="4" ${val==='4'?'selected':''}>4</option><option value="5" ${val==='5'?'selected':''}>5</option><option value="Н" ${val==='Н'?'selected':''}>Н</option><option value="Б" ${val==='Б'?'selected':''}>Б</option><option value="О" ${val==='О'?'selected':''}>О</option></select></td>`}).join('')}
+    ${d.columns.map(md=>{let c=s.cells[md];let val=c?String(c.value):'';return `<td class="markcell"><select onchange="setCell(${s.id},${id},'${md}',this.value)" aria-label="${esc(s.full_name)} ${ruDate(md)}"><option value="" ${!val?'selected':''}>—</option><option value="2" ${val==='2'?'selected':''}>2</option><option value="3" ${val==='3'?'selected':''}>3</option><option value="4" ${val==='4'?'selected':''}>4</option><option value="5" ${val==='5'?'selected':''}>5</option><option value="Н" ${val==='Н'?'selected':''}>Н</option><option value="Б" ${val==='Б'?'selected':''}>Б</option><option value="О" ${val==='О'?'selected':''}>О</option></select></td>`}).join('')}
     <td class="avgcell"><b>${avg(s.stats.average)}</b></td>
   </tr>`).join('');
   shell(`Журнал · ${esc(d.discipline.name)}`,`<div class="booktools"><button class="excelbtn" onclick="addColumn(${id})">➕ Добавить дату</button><span>2–5 — среднее · Н/Б/О не учитываются</span></div><div class="tablewrap"><table class="gradebook"><thead><tr><th class="namehead">Фамилия и Имя</th>${heads}<th>Среднее</th></tr></thead><tbody>${rows}</tbody></table></div>`)
 }
 async function addColumn(id){
-  let v=prompt('Введите дату столбца в формате ДД.ММ.ГГГГ');
-  if(!v)return;
+  let v=prompt('Дата нового столбца (например 25.09.2026)');
+  if(v===null)return;
   v=v.trim();
-  let md='';
-  if(/^\d{4}-\d{2}-\d{2}$/.test(v)) md=v;
-  else if(/^\d{2}\.\d{2}\.\d{4}$/.test(v)){let [dd,mm,yyyy]=v.split('.');md=`${yyyy}-${mm}-${dd}`;}
-  else return alert('Неверная дата. Пример: 25.09.2026');
+  let m=v.match(/^(\d{1,2})[.\/](\d{1,2})[.\/](\d{4})$/);
+  if(!m)return alert('Введите дату так: 25.09.2026');
+  let dd=String(m[1]).padStart(2,'0'), mm=String(m[2]).padStart(2,'0'), yyyy=m[3];
+  let dt=new Date(Number(yyyy),Number(mm)-1,Number(dd));
+  if(dt.getFullYear()!=Number(yyyy)||dt.getMonth()!=Number(mm)-1||dt.getDate()!=Number(dd))return alert('Такой даты не существует.');
+  let md=`${yyyy}-${mm}-${dd}`;
   try{await api('/api/admin/grades/'+id+'/columns',{method:'POST',body:JSON.stringify({date:md})});await gradeBook(id)}catch(e){alert('Не удалось добавить дату: '+e.message)}
 }
 async function setCell(sid,did,md,v){

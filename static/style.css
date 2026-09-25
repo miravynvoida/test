@@ -15,3 +15,19 @@
 .gradebook .markcell select:focus{outline:2px solid #4a90e2;outline-offset:-2px}
 .gradebook .avgcell{min-width:75px;background:#f2f2f2;font-weight:700}
 .gradebook tbody tr:nth-child(even) .namecell{background:#f7f7f7}
+
+/* Классический Excel-подобный журнал */
+.booktools{border:1px solid #999;background:#eee;color:#222;border-radius:0;padding:6px;margin:8px 0;box-shadow:none}
+.booktools .excelbtn{border:1px solid #777;border-radius:0;background:#fff;color:#111;padding:7px 10px;font-weight:600}
+.tablewrap{overflow:auto;border:1px solid #777;border-radius:0;background:#fff;max-height:65vh}
+.gradebook{border-collapse:collapse;min-width:720px;width:100%;background:#fff;color:#111;font-size:13px}
+.gradebook th,.gradebook td{border:1px solid #888;padding:0;height:38px;text-align:center;border-radius:0}
+.gradebook thead th{position:sticky;top:0;background:#d9e2f3;color:#111;font-weight:700;height:34px;border:1px solid #777;z-index:3}
+.gradebook .namehead{position:sticky;left:0;z-index:5;text-align:left;padding:6px;background:#d9e2f3;min-width:210px}
+.gradebook .namecell{position:sticky;left:0;z-index:2;text-align:left;padding:6px;background:#fff;font-weight:500;min-width:210px}
+.gradebook .datehead{min-width:78px}
+.gradebook .markcell{min-width:58px;padding:0;background:#fff}
+.gradebook .markcell select{width:100%;height:38px;border:0;border-radius:0;background:#fff;color:#111;text-align:center;text-align-last:center;font-weight:700;font-size:14px;outline:none;cursor:pointer;appearance:auto}
+.gradebook .markcell select:focus{outline:2px solid #4a90e2;outline-offset:-2px}
+.gradebook .avgcell{min-width:75px;background:#f2f2f2;font-weight:700}
+.gradebook tbody tr:nth-child(even) .namecell{background:#f7f7f7}
