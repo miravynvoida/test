@@ -61,6 +61,8 @@ def migrate():
     CREATE TABLE IF NOT EXISTS app_migrations (id TEXT PRIMARY KEY, applied_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS google_sync_state (id INTEGER PRIMARY KEY CHECK(id=1), last_sync_at TEXT, last_status TEXT, last_error TEXT, updated_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS homework_upload_requests (telegram_id INTEGER PRIMARY KEY, homework_id INTEGER NOT NULL, created_at TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'waiting', FOREIGN KEY(homework_id) REFERENCES homework(id) ON DELETE CASCADE);
+    CREATE TABLE IF NOT EXISTS homework_answer (homework_id INTEGER PRIMARY KEY, kind TEXT NOT NULL DEFAULT 'text', text TEXT DEFAULT '', file_id TEXT DEFAULT '', caption TEXT DEFAULT '', FOREIGN KEY(homework_id) REFERENCES homework(id) ON DELETE CASCADE);
+    CREATE TABLE IF NOT EXISTS homework_media (id INTEGER PRIMARY KEY AUTOINCREMENT, homework_id INTEGER NOT NULL, kind TEXT NOT NULL, file_id TEXT NOT NULL, caption TEXT DEFAULT '', FOREIGN KEY(homework_id) REFERENCES homework(id) ON DELETE CASCADE);
     
     """)
     notif_cols = {r[1] for r in cur.execute("PRAGMA table_info(notification_settings)").fetchall()}
@@ -525,9 +527,8 @@ async def initial_settings_prompt(bot, uid):
     if int(r["setup_version"] or 0) < 1:
         await show(bot,uid,"⚙️ <b>Первоначальная настройка</b>\n\nДавайте один раз настроим бота под вас. Вы сможете выбрать уведомления, время напоминаний и другие параметры. Настройки сохраняются и больше не потеряются при следующем /start.",ik([[b("⚙️ Пройти полную настройку","settings:notif:setup")],[b("⏭ Пропустить сейчас","settings:setup_skip")]]))
         return True
-    # /start for an already configured user also offers a quick way to revisit the setup.
-    await show(bot,uid,"👋 <b>С возвращением!</b>\n\nВаши настройки сохранены. Хотите открыть их и при необходимости изменить?",ik([[b("⚙️ Изменить настройки","settings:notif:setup")],[b("➡️ В главное меню","start:menu")]]))
-    return True
+    # After the one-time setup, /start always goes straight to the main menu.
+    return False
 
 @router.callback_query(F.data=="settings:setup_skip")
 async def settings_setup_skip(c:CallbackQuery):
@@ -1502,6 +1503,12 @@ async def admin_file_request_bridge(m: Message):
     elif req['target_type'] == 'material':
         cc.execute("UPDATE additional_materials SET kind=?,file_id=?,caption=? WHERE id=?", (x[0],x[1],x[2],req['target_id']))
         msg = '✅ Файл дополнительного материала прикреплён.'
+    elif req['target_type'] == 'homework':
+        cc.execute("INSERT INTO homework_media(homework_id,kind,file_id,caption) VALUES(?,?,?,?)",(req['target_id'],x[0],x[1],x[2]))
+        msg = '✅ Файл ДЗ прикреплён.'
+    elif req['target_type'] == 'homework_answer':
+        cc.execute("INSERT INTO homework_answer(homework_id,kind,file_id,text,caption) VALUES(?,?,?,?,?) ON CONFLICT(homework_id) DO UPDATE SET kind=excluded.kind,file_id=excluded.file_id,text='',caption=excluded.caption",(req['target_id'],x[0],x[1],'',x[2]))
+        msg = '✅ Файл готового ответа прикреплён.'
     else:
         cc.close()
         return

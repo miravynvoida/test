@@ -120,6 +120,8 @@ def migrate_web_tables():
         CREATE TABLE IF NOT EXISTS app_migrations (id TEXT PRIMARY KEY, applied_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS google_sync_state (id INTEGER PRIMARY KEY CHECK(id=1), last_sync_at TEXT, last_status TEXT, last_error TEXT, updated_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS homework_upload_requests (telegram_id INTEGER PRIMARY KEY, homework_id INTEGER NOT NULL, created_at TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'waiting', FOREIGN KEY(homework_id) REFERENCES homework(id) ON DELETE CASCADE);
+        CREATE TABLE IF NOT EXISTS homework_answer (homework_id INTEGER PRIMARY KEY, kind TEXT NOT NULL DEFAULT 'text', text TEXT DEFAULT '', file_id TEXT DEFAULT '', caption TEXT DEFAULT '', FOREIGN KEY(homework_id) REFERENCES homework(id) ON DELETE CASCADE);
+        CREATE TABLE IF NOT EXISTS homework_media (id INTEGER PRIMARY KEY AUTOINCREMENT, homework_id INTEGER NOT NULL, kind TEXT NOT NULL, file_id TEXT NOT NULL, caption TEXT DEFAULT '', FOREIGN KEY(homework_id) REFERENCES homework(id) ON DELETE CASCADE);
         CREATE TABLE IF NOT EXISTS notification_settings (telegram_id INTEGER PRIMARY KEY, tomorrow_schedule INTEGER NOT NULL DEFAULT 1, next_lesson INTEGER NOT NULL DEFAULT 1, updates INTEGER NOT NULL DEFAULT 1, other INTEGER NOT NULL DEFAULT 1, deadline_reminders INTEGER NOT NULL DEFAULT 1, next_lesson_minutes INTEGER NOT NULL DEFAULT 30, new_homework INTEGER NOT NULL DEFAULT 1, setup_done INTEGER NOT NULL DEFAULT 0, setup_version INTEGER NOT NULL DEFAULT 0, silent_notifications INTEGER NOT NULL DEFAULT 0, FOREIGN KEY(telegram_id) REFERENCES students(telegram_id) ON DELETE CASCADE);
         CREATE TABLE IF NOT EXISTS admin_file_requests (
             telegram_id INTEGER PRIMARY KEY,
@@ -227,6 +229,13 @@ class HomeworkCreateIn(BaseModel):
     wants_file: bool = False
     client_token: str | None = Field(default=None, max_length=80)
 
+
+class HomeworkEditIn(BaseModel):
+    title: str = Field(min_length=1, max_length=200)
+    text: str = Field(min_length=1, max_length=10000)
+    explanation: str = Field(default="", max_length=5000)
+    due_date: str
+    answer_text: str = Field(default="", max_length=10000)
 
 class LessonIn(BaseModel):
     day: str
@@ -781,7 +790,45 @@ def admin_homework_detail(homework_id:int,x_telegram_init_data:str|None=Header(d
     if not h:
         c.close(); raise HTTPException(404,"ДЗ не найдено.")
     media=c.execute("SELECT id,kind,file_id,caption FROM homework_media WHERE homework_id=? ORDER BY id",(homework_id,)).fetchall()
-    c.close(); return {"item":dict(h),"media":[dict(x) for x in media]}
+    answer=c.execute("SELECT homework_id,kind,text,file_id,caption FROM homework_answer WHERE homework_id=?",(homework_id,)).fetchone()
+    c.close(); return {"item":dict(h),"media":[dict(x) for x in media],"answer":dict(answer) if answer else {}}
+
+@app.patch("/api/admin/homework/{homework_id}")
+def admin_homework_edit(homework_id:int, payload:HomeworkEditIn, x_telegram_init_data:str|None=Header(default=None)):
+    admin_auth(x_telegram_init_data)
+    due=parse_hw_date(payload.due_date)
+    if not due: raise HTTPException(400,"Неверная дата сдачи.")
+    c=db(); h=c.execute("SELECT id FROM homework WHERE id=?",(homework_id,)).fetchone()
+    if not h: c.close(); raise HTTPException(404,"ДЗ не найдено.")
+    c.execute("UPDATE homework SET text=?, explanation=?, due_date=? WHERE id=?",(payload.text,payload.explanation,due,homework_id))
+    c.execute("INSERT INTO homework_extra(homework_id,title) VALUES(?,?) ON CONFLICT(homework_id) DO UPDATE SET title=excluded.title",(homework_id,payload.title))
+    if payload.answer_text.strip():
+        c.execute("INSERT INTO homework_answer(homework_id,kind,text,file_id,caption) VALUES(?,?,?,?,?) ON CONFLICT(homework_id) DO UPDATE SET kind='text',text=excluded.text,file_id='',caption=''",(homework_id,'text',payload.answer_text.strip(),'',''))
+    elif payload.answer_text == '':
+        # Preserve an existing file answer; only remove a text answer when the editor is cleared.
+        a=c.execute("SELECT kind,file_id FROM homework_answer WHERE homework_id=?",(homework_id,)).fetchone()
+        if a and a['kind']=='text': c.execute("DELETE FROM homework_answer WHERE homework_id=?",(homework_id,))
+    c.commit(); c.close(); return {"ok":True}
+
+@app.post("/api/admin/homework/{homework_id}/request-file")
+def admin_homework_request_file(homework_id:int,x_telegram_init_data:str|None=Header(default=None)):
+    uid,_,_,_=admin_auth(x_telegram_init_data); c=db(); h=c.execute("SELECT id FROM homework WHERE id=?",(homework_id,)).fetchone()
+    if not h: c.close(); raise HTTPException(404,"ДЗ не найдено.")
+    c.execute("INSERT OR REPLACE INTO admin_file_requests(telegram_id,target_type,target_id,created_at) VALUES(?,?,?,?)",(uid,'homework',homework_id,now_iso())); c.commit(); c.close(); return {"ok":True}
+
+@app.delete("/api/admin/homework/{homework_id}/media/{media_id}")
+def admin_homework_media_delete(homework_id:int,media_id:int,x_telegram_init_data:str|None=Header(default=None)):
+    admin_auth(x_telegram_init_data); c=db(); c.execute("DELETE FROM homework_media WHERE id=? AND homework_id=?",(media_id,homework_id)); c.commit(); c.close(); return {"ok":True}
+
+@app.post("/api/admin/homework/{homework_id}/request-answer-file")
+def admin_homework_request_answer_file(homework_id:int,x_telegram_init_data:str|None=Header(default=None)):
+    uid,_,_,_=admin_auth(x_telegram_init_data); c=db(); h=c.execute("SELECT id FROM homework WHERE id=?",(homework_id,)).fetchone()
+    if not h: c.close(); raise HTTPException(404,"ДЗ не найдено.")
+    c.execute("INSERT OR REPLACE INTO admin_file_requests(telegram_id,target_type,target_id,created_at) VALUES(?,?,?,?)",(uid,'homework_answer',homework_id,now_iso())); c.commit(); c.close(); return {"ok":True}
+
+@app.delete("/api/admin/homework/{homework_id}/answer")
+def admin_homework_answer_delete(homework_id:int,x_telegram_init_data:str|None=Header(default=None)):
+    admin_auth(x_telegram_init_data); c=db(); c.execute("DELETE FROM homework_answer WHERE homework_id=?",(homework_id,)); c.commit(); c.close(); return {"ok":True}
 
 @app.delete("/api/admin/homework/{homework_id}")
 def admin_homework_delete(homework_id:int,x_telegram_init_data:str|None=Header(default=None)):
