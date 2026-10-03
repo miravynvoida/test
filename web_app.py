@@ -120,7 +120,7 @@ def migrate_web_tables():
         CREATE TABLE IF NOT EXISTS app_migrations (id TEXT PRIMARY KEY, applied_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS google_sync_state (id INTEGER PRIMARY KEY CHECK(id=1), last_sync_at TEXT, last_status TEXT, last_error TEXT, updated_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS homework_upload_requests (telegram_id INTEGER PRIMARY KEY, homework_id INTEGER NOT NULL, created_at TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'waiting', FOREIGN KEY(homework_id) REFERENCES homework(id) ON DELETE CASCADE);
-        CREATE TABLE IF NOT EXISTS notification_settings (telegram_id INTEGER PRIMARY KEY, tomorrow_schedule INTEGER NOT NULL DEFAULT 1, next_lesson INTEGER NOT NULL DEFAULT 1, updates INTEGER NOT NULL DEFAULT 1, other INTEGER NOT NULL DEFAULT 1, deadline_reminders INTEGER NOT NULL DEFAULT 1, next_lesson_minutes INTEGER NOT NULL DEFAULT 30, new_homework INTEGER NOT NULL DEFAULT 1, setup_done INTEGER NOT NULL DEFAULT 0, FOREIGN KEY(telegram_id) REFERENCES students(telegram_id) ON DELETE CASCADE);
+        CREATE TABLE IF NOT EXISTS notification_settings (telegram_id INTEGER PRIMARY KEY, tomorrow_schedule INTEGER NOT NULL DEFAULT 1, next_lesson INTEGER NOT NULL DEFAULT 1, updates INTEGER NOT NULL DEFAULT 1, other INTEGER NOT NULL DEFAULT 1, deadline_reminders INTEGER NOT NULL DEFAULT 1, next_lesson_minutes INTEGER NOT NULL DEFAULT 30, new_homework INTEGER NOT NULL DEFAULT 1, setup_done INTEGER NOT NULL DEFAULT 0, setup_version INTEGER NOT NULL DEFAULT 0, silent_notifications INTEGER NOT NULL DEFAULT 0, FOREIGN KEY(telegram_id) REFERENCES students(telegram_id) ON DELETE CASCADE);
         CREATE TABLE IF NOT EXISTS admin_file_requests (
             telegram_id INTEGER PRIMARY KEY,
             target_type TEXT NOT NULL,
@@ -138,9 +138,12 @@ def migrate_web_tables():
         c.execute('ALTER TABLE homework ADD COLUMN client_token TEXT')
     c.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_homework_client_token ON homework(client_token) WHERE client_token IS NOT NULL')
     ncols=cols('notification_settings')
-    for col,ddl in [('updates','INTEGER NOT NULL DEFAULT 1'),('other','INTEGER NOT NULL DEFAULT 1'),('deadline_reminders','INTEGER NOT NULL DEFAULT 1'),('next_lesson_minutes','INTEGER NOT NULL DEFAULT 30'),('new_homework','INTEGER NOT NULL DEFAULT 1'),('setup_done','INTEGER NOT NULL DEFAULT 0')]:
+    setup_version_missing = 'setup_version' not in ncols
+    for col,ddl in [('updates','INTEGER NOT NULL DEFAULT 1'),('other','INTEGER NOT NULL DEFAULT 1'),('deadline_reminders','INTEGER NOT NULL DEFAULT 1'),('next_lesson_minutes','INTEGER NOT NULL DEFAULT 30'),('new_homework','INTEGER NOT NULL DEFAULT 1'),('setup_done','INTEGER NOT NULL DEFAULT 0'),('setup_version','INTEGER NOT NULL DEFAULT 0'),('silent_notifications','INTEGER NOT NULL DEFAULT 0')]:
         if col not in ncols:
             c.execute(f'ALTER TABLE notification_settings ADD COLUMN {col} {ddl}')
+    if setup_version_missing:
+        c.execute('UPDATE notification_settings SET setup_version=0')
     c.execute('INSERT OR IGNORE INTO notification_settings(telegram_id) SELECT telegram_id FROM students WHERE telegram_id IS NOT NULL')
 
     gd_sql = c.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='grade_dates'").fetchone()
@@ -366,7 +369,7 @@ def me(x_telegram_init_data: str | None = Header(default=None)):
         "student_id": student["id"] if student else None,
         "is_admin": is_admin,
         "stats": stats,
-        "needs_setup": bool(ns and not ns["setup_done"]) if student else False,
+        "needs_setup": bool(ns and int(ns["setup_version"] or 0) < 1) if student else False,
         "telegram": {"first_name": tg_user.get("first_name", ""), "username": tg_user.get("username", "")},
     }
 
@@ -415,7 +418,7 @@ def next_lesson(x_telegram_init_data: str | None = Header(default=None)):
 def get_settings(x_telegram_init_data: str | None = Header(default=None)):
     uid, student, _, _ = current_user(x_telegram_init_data)
     c=db(); c.execute("INSERT OR IGNORE INTO notification_settings(telegram_id) VALUES(?)", (uid,)); c.commit()
-    r=c.execute("SELECT tomorrow_schedule,next_lesson,updates,other,deadline_reminders,next_lesson_minutes,new_homework,setup_done FROM notification_settings WHERE telegram_id=?", (uid,)).fetchone(); c.close()
+    r=c.execute("SELECT tomorrow_schedule,next_lesson,updates,other,deadline_reminders,next_lesson_minutes,new_homework,setup_done,setup_version,silent_notifications FROM notification_settings WHERE telegram_id=?", (uid,)).fetchone(); c.close()
     return dict(r)
 
 class SettingsIn(BaseModel):
@@ -427,6 +430,8 @@ class SettingsIn(BaseModel):
     next_lesson_minutes: int = Field(default=30, ge=5, le=90)
     new_homework: bool = True
     setup_done: bool = False
+    setup_version: int = 0
+    silent_notifications: bool = False
 
 @app.patch("/api/settings")
 def update_settings(payload: SettingsIn, x_telegram_init_data: str | None = Header(default=None)):
@@ -434,9 +439,9 @@ def update_settings(payload: SettingsIn, x_telegram_init_data: str | None = Head
     allowed={5,10,15,30,45,60,90}
     if payload.next_lesson_minutes not in allowed:
         raise HTTPException(400, "Недопустимое время напоминания.")
-    c=db(); c.execute("""INSERT INTO notification_settings(telegram_id,tomorrow_schedule,next_lesson,updates,other,deadline_reminders,next_lesson_minutes,new_homework,setup_done)
-        VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(telegram_id) DO UPDATE SET tomorrow_schedule=excluded.tomorrow_schedule,next_lesson=excluded.next_lesson,updates=excluded.updates,other=excluded.other,deadline_reminders=excluded.deadline_reminders,next_lesson_minutes=excluded.next_lesson_minutes,new_homework=excluded.new_homework,setup_done=excluded.setup_done""",
-        (uid,int(payload.tomorrow_schedule),int(payload.next_lesson),int(payload.updates),int(payload.other),int(payload.deadline_reminders),payload.next_lesson_minutes,int(payload.new_homework),int(payload.setup_done)))
+    c=db(); c.execute("""INSERT INTO notification_settings(telegram_id,tomorrow_schedule,next_lesson,updates,other,deadline_reminders,next_lesson_minutes,new_homework,setup_done,setup_version,silent_notifications)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(telegram_id) DO UPDATE SET tomorrow_schedule=excluded.tomorrow_schedule,next_lesson=excluded.next_lesson,updates=excluded.updates,other=excluded.other,deadline_reminders=excluded.deadline_reminders,next_lesson_minutes=excluded.next_lesson_minutes,new_homework=excluded.new_homework,setup_done=excluded.setup_done,setup_version=excluded.setup_version,silent_notifications=excluded.silent_notifications""",
+        (uid,int(payload.tomorrow_schedule),int(payload.next_lesson),int(payload.updates),int(payload.other),int(payload.deadline_reminders),payload.next_lesson_minutes,int(payload.new_homework),int(payload.setup_done),int(payload.setup_version),int(payload.silent_notifications)))
     c.commit(); c.close(); return {"ok":True}
 
 @app.get("/api/home")
@@ -769,6 +774,15 @@ def admin_homework_api(x_telegram_init_data: str | None = Header(default=None)):
     admin_auth(x_telegram_init_data); c=db()
     rows=c.execute("""SELECT h.*,d.name discipline,d.emoji,COALESCE(e.title,substr(h.text,1,80)) title FROM homework h JOIN disciplines d ON d.id=h.discipline_id LEFT JOIN homework_extra e ON e.homework_id=h.id ORDER BY h.archived,h.due_date DESC,h.id DESC""").fetchall(); c.close(); return {"items":[dict(x) for x in rows]}
 
+@app.get("/api/admin/homework/{homework_id}")
+def admin_homework_detail(homework_id:int,x_telegram_init_data:str|None=Header(default=None)):
+    admin_auth(x_telegram_init_data); c=db()
+    h=c.execute("""SELECT h.*,d.name discipline,d.emoji,COALESCE(e.title,substr(h.text,1,80)) title FROM homework h JOIN disciplines d ON d.id=h.discipline_id LEFT JOIN homework_extra e ON e.homework_id=h.id WHERE h.id=?""",(homework_id,)).fetchone()
+    if not h:
+        c.close(); raise HTTPException(404,"ДЗ не найдено.")
+    media=c.execute("SELECT id,kind,file_id,caption FROM homework_media WHERE homework_id=? ORDER BY id",(homework_id,)).fetchall()
+    c.close(); return {"item":dict(h),"media":[dict(x) for x in media]}
+
 @app.delete("/api/admin/homework/{homework_id}")
 def admin_homework_delete(homework_id:int,x_telegram_init_data:str|None=Header(default=None)):
     admin_auth(x_telegram_init_data); c=db(); c.execute("DELETE FROM homework WHERE id=?",(homework_id,)); c.commit(); c.close(); return {"ok":True}
@@ -776,6 +790,10 @@ def admin_homework_delete(homework_id:int,x_telegram_init_data:str|None=Header(d
 @app.post("/api/admin/homework/{homework_id}/archive")
 def admin_homework_archive(homework_id:int,x_telegram_init_data:str|None=Header(default=None)):
     admin_auth(x_telegram_init_data); c=db(); c.execute("UPDATE homework SET archived=1 WHERE id=?",(homework_id,)); c.commit(); c.close(); return {"ok":True}
+
+@app.post("/api/admin/homework/{homework_id}/restore")
+def admin_homework_restore(homework_id:int,x_telegram_init_data:str|None=Header(default=None)):
+    admin_auth(x_telegram_init_data); c=db(); c.execute("UPDATE homework SET archived=0 WHERE id=?",(homework_id,)); c.commit(); c.close(); return {"ok":True}
 
 @app.get("/api/admin/textbooks")
 def admin_textbooks(x_telegram_init_data: str | None = Header(default=None)):

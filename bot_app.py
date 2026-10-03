@@ -53,7 +53,7 @@ def migrate():
     CREATE TABLE IF NOT EXISTS bell_times (slot INTEGER PRIMARY KEY, start TEXT NOT NULL, end TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS schedule_days (id INTEGER PRIMARY KEY AUTOINCREMENT, day TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS schedule_lessons (id INTEGER PRIMARY KEY AUTOINCREMENT, schedule_day_id INTEGER NOT NULL, lesson_no INTEGER NOT NULL, start TEXT NOT NULL, end TEXT NOT NULL, discipline_id INTEGER NOT NULL, lesson_type TEXT NOT NULL, room TEXT NOT NULL, FOREIGN KEY(schedule_day_id) REFERENCES schedule_days(id) ON DELETE CASCADE, FOREIGN KEY(discipline_id) REFERENCES disciplines(id));
-    CREATE TABLE IF NOT EXISTS notification_settings (telegram_id INTEGER PRIMARY KEY, tomorrow_schedule INTEGER NOT NULL DEFAULT 1, next_lesson INTEGER NOT NULL DEFAULT 1, updates INTEGER NOT NULL DEFAULT 1, other INTEGER NOT NULL DEFAULT 1, deadline_reminders INTEGER NOT NULL DEFAULT 1, FOREIGN KEY(telegram_id) REFERENCES students(telegram_id) ON DELETE CASCADE);
+    CREATE TABLE IF NOT EXISTS notification_settings (telegram_id INTEGER PRIMARY KEY, tomorrow_schedule INTEGER NOT NULL DEFAULT 1, next_lesson INTEGER NOT NULL DEFAULT 1, updates INTEGER NOT NULL DEFAULT 1, other INTEGER NOT NULL DEFAULT 1, deadline_reminders INTEGER NOT NULL DEFAULT 1, new_homework INTEGER NOT NULL DEFAULT 1, next_lesson_minutes INTEGER NOT NULL DEFAULT 30, setup_done INTEGER NOT NULL DEFAULT 0, setup_version INTEGER NOT NULL DEFAULT 0, silent_notifications INTEGER NOT NULL DEFAULT 0, FOREIGN KEY(telegram_id) REFERENCES students(telegram_id) ON DELETE CASCADE);
     CREATE TABLE IF NOT EXISTS sent_notifications (telegram_id INTEGER NOT NULL, notification_key TEXT NOT NULL, PRIMARY KEY(telegram_id, notification_key));
     CREATE TABLE IF NOT EXISTS homework_extra (homework_id INTEGER PRIMARY KEY, title TEXT NOT NULL, FOREIGN KEY(homework_id) REFERENCES homework(id) ON DELETE CASCADE);
     CREATE TABLE IF NOT EXISTS homework_views (telegram_id INTEGER NOT NULL, homework_id INTEGER NOT NULL, viewed_at TEXT NOT NULL, PRIMARY KEY(telegram_id, homework_id));
@@ -64,11 +64,22 @@ def migrate():
     
     """)
     notif_cols = {r[1] for r in cur.execute("PRAGMA table_info(notification_settings)").fetchall()}
-    for col in ("updates", "other", "deadline_reminders", "new_homework", "setup_done"):
+    for col in ("updates", "other", "deadline_reminders", "new_homework"):
         if col not in notif_cols:
             cur.execute(f"ALTER TABLE notification_settings ADD COLUMN {col} INTEGER NOT NULL DEFAULT 1")
+    if "setup_done" not in notif_cols:
+        cur.execute("ALTER TABLE notification_settings ADD COLUMN setup_done INTEGER NOT NULL DEFAULT 0")
     if "next_lesson_minutes" not in notif_cols:
         cur.execute("ALTER TABLE notification_settings ADD COLUMN next_lesson_minutes INTEGER NOT NULL DEFAULT 30")
+    if "setup_version" not in notif_cols:
+        cur.execute("ALTER TABLE notification_settings ADD COLUMN setup_version INTEGER NOT NULL DEFAULT 0")
+    if "silent_notifications" not in notif_cols:
+        cur.execute("ALTER TABLE notification_settings ADD COLUMN silent_notifications INTEGER NOT NULL DEFAULT 0")
+    # Users from older builds did not have a durable setup marker. Give them the new one-time setup now.
+    if "setup_version" not in notif_cols:
+        cur.execute("UPDATE notification_settings SET setup_version=0")
+    else:
+        cur.execute("UPDATE notification_settings SET setup_version=0 WHERE setup_version IS NULL")
     hcols = {r[1] for r in cur.execute("PRAGMA table_info(homework)").fetchall()}
     if "client_token" not in hcols:
         cur.execute("ALTER TABLE homework ADD COLUMN client_token TEXT")
@@ -504,15 +515,27 @@ async def book_back(c:CallbackQuery):
 
 # Settings
 async def initial_settings_prompt(bot, uid):
-    cc=db(); cc.execute("INSERT OR IGNORE INTO notification_settings(telegram_id) VALUES(?)", (uid,)); cc.commit(); r=cc.execute("SELECT setup_done FROM notification_settings WHERE telegram_id=?", (uid,)).fetchone(); cc.close()
-    if not r or r["setup_done"]:
+    cc=db()
+    cc.execute("INSERT OR IGNORE INTO notification_settings(telegram_id) VALUES(?)", (uid,))
+    cc.commit()
+    r=cc.execute("SELECT setup_done,COALESCE(setup_version,0) setup_version FROM notification_settings WHERE telegram_id=?", (uid,)).fetchone()
+    cc.close()
+    if not r:
         return False
-    await show(bot,uid,"⚙️ <b>Первоначальная настройка</b>\n\nВыберите, какие уведомления получать. Всё можно изменить позже в разделе «Настройки».",ik([[b("🔔 Настроить уведомления","settings:notif:setup")],[b("Пропустить","settings:setup_skip")]]))
+    if int(r["setup_version"] or 0) < 1:
+        await show(bot,uid,"⚙️ <b>Первоначальная настройка</b>\n\nДавайте один раз настроим бота под вас. Вы сможете выбрать уведомления, время напоминаний и другие параметры. Настройки сохраняются и больше не потеряются при следующем /start.",ik([[b("⚙️ Пройти полную настройку","settings:notif:setup")],[b("⏭ Пропустить сейчас","settings:setup_skip")]]))
+        return True
+    # /start for an already configured user also offers a quick way to revisit the setup.
+    await show(bot,uid,"👋 <b>С возвращением!</b>\n\nВаши настройки сохранены. Хотите открыть их и при необходимости изменить?",ik([[b("⚙️ Изменить настройки","settings:notif:setup")],[b("➡️ В главное меню","start:menu")]]))
     return True
 
 @router.callback_query(F.data=="settings:setup_skip")
 async def settings_setup_skip(c:CallbackQuery):
-    cc=db(); cc.execute("INSERT OR IGNORE INTO notification_settings(telegram_id) VALUES(?)",(c.from_user.id,)); cc.execute("UPDATE notification_settings SET setup_done=1 WHERE telegram_id=?",(c.from_user.id,)); cc.commit(); cc.close(); await c.answer(); await main_menu(c.bot,c.from_user.id)
+    cc=db(); cc.execute("INSERT OR IGNORE INTO notification_settings(telegram_id) VALUES(?)",(c.from_user.id,)); cc.execute("UPDATE notification_settings SET setup_done=1,setup_version=1 WHERE telegram_id=?",(c.from_user.id,)); cc.commit(); cc.close(); await c.answer(); await main_menu(c.bot,c.from_user.id)
+
+@router.callback_query(F.data=="start:menu")
+async def start_menu_callback(c:CallbackQuery):
+    await c.answer(); await main_menu(c.bot,c.from_user.id)
 
 @router.callback_query(F.data=="menu:settings")
 async def settings(c:CallbackQuery):
@@ -534,7 +557,8 @@ async def notification_settings_menu(c:CallbackQuery):
         f"🔄 Обновления: {'✅' if s['updates'] else '❌'}\n"
         f"📢 Прочие уведомления: {'✅' if s['other'] else '❌'}\n"
         f"⏰ Напоминания о дедлайнах: {'✅' if s['deadline_reminders'] else '❌'}\n"
-        f"📝 Новое ДЗ: {'✅' if s['new_homework'] else '❌'}\n\n"
+        f"📝 Новое ДЗ: {'✅' if s['new_homework'] else '❌'}\n"
+        f"🔕 Тихие уведомления: {'✅' if s['silent_notifications'] else '❌'}\n\n"
         "🚨 Важные системные сообщения нельзя отключить.",
         ik([
             [b("🔔 Вкл./выкл. следующую пару","set:next_toggle")],
@@ -544,13 +568,14 @@ async def notification_settings_menu(c:CallbackQuery):
             [b("📢 Прочие уведомления","set:other")],
             [b("⏰ Напоминания о дедлайнах","set:deadline")],
             [b("📝 Новое ДЗ","set:new_homework")],
+            [b("🔕 Тихие уведомления","set:silent")],
             ([b("✅ Готово","settings:setup_done")] if setup_mode else [b("🔙 Назад","menu:settings")])
         ]))
 
 
 @router.callback_query(F.data=="settings:setup_done")
 async def settings_setup_done(c:CallbackQuery):
-    cc=db(); cc.execute("INSERT OR IGNORE INTO notification_settings(telegram_id) VALUES(?)",(c.from_user.id,)); cc.execute("UPDATE notification_settings SET setup_done=1 WHERE telegram_id=?",(c.from_user.id,)); cc.commit(); cc.close(); await c.answer("Настройки сохранены"); await main_menu(c.bot,c.from_user.id)
+    cc=db(); cc.execute("INSERT OR IGNORE INTO notification_settings(telegram_id) VALUES(?)",(c.from_user.id,)); cc.execute("UPDATE notification_settings SET setup_done=1,setup_version=1 WHERE telegram_id=?",(c.from_user.id,)); cc.commit(); cc.close(); await c.answer("Настройки сохранены"); await main_menu(c.bot,c.from_user.id)
 
 @router.callback_query(F.data=="set:next_time")
 async def next_time_menu(c:CallbackQuery):
@@ -577,9 +602,9 @@ async def set_next_time(c:CallbackQuery):
     await notification_settings_menu(c)
 
 
-@router.callback_query(F.data.in_({"set:tomorrow","set:next_toggle","set:updates","set:other","set:deadline","set:new_homework"}))
+@router.callback_query(F.data.in_({"set:tomorrow","set:next_toggle","set:updates","set:other","set:deadline","set:new_homework","set:silent"}))
 async def toggle(c:CallbackQuery):
-    col={"set:tomorrow":"tomorrow_schedule","set:next_toggle":"next_lesson","set:updates":"updates","set:other":"other","set:deadline":"deadline_reminders","set:new_homework":"new_homework"}[c.data]
+    col={"set:tomorrow":"tomorrow_schedule","set:next_toggle":"next_lesson","set:updates":"updates","set:other":"other","set:deadline":"deadline_reminders","set:new_homework":"new_homework","set:silent":"silent_notifications"}[c.data]
     cc=db(); cc.execute("INSERT OR IGNORE INTO notification_settings(telegram_id) VALUES(?)",(c.from_user.id,)); cc.execute(f"UPDATE notification_settings SET {col}=1-{col} WHERE telegram_id=?",(c.from_user.id,)); cc.commit(); cc.close(); await notification_settings_menu(c)
 
 
