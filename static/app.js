@@ -1,5 +1,13 @@
 const tg = window.Telegram?.WebApp;
-if (tg) { tg.ready(); tg.expand(); try { tg.setHeaderColor(tg.themeParams?.bg_color || '#f6f7fb'); tg.setBackgroundColor(tg.themeParams?.bg_color || '#f6f7fb'); } catch(e){} }
+function applyTelegramTheme(){
+  const dark=tg?.colorScheme==='dark';
+  document.documentElement.classList.toggle('dark-theme',dark);
+}
+if (tg) {
+  tg.ready(); tg.expand(); applyTelegramTheme();
+  tg.onEvent?.('themeChanged', applyTelegramTheme);
+  try { tg.setHeaderColor(tg.themeParams?.bg_color || '#f6f7fb'); tg.setBackgroundColor(tg.themeParams?.bg_color || '#f6f7fb'); } catch(e){}
+}
 
 const pad=n=>String(n).padStart(2,'0');
 const localToday=()=>{const d=new Date();return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`};
