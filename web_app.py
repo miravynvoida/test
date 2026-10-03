@@ -226,22 +226,6 @@ class LessonPatch(BaseModel):
     room: str | None = None
 
 
-class AdminStudentPatch(BaseModel):
-    full_name: str | None = Field(default=None, max_length=200)
-    telegram_id: int | None = None
-
-class AdminDisciplineIn(BaseModel):
-    name: str = Field(min_length=1, max_length=200)
-    emoji: str = Field(default="📚", max_length=10)
-
-class AdminHomeworkPatch(BaseModel):
-    title: str | None = Field(default=None, max_length=200)
-    text: str | None = Field(default=None, max_length=10000)
-    explanation: str | None = Field(default=None, max_length=5000)
-    due_date: str | None = None
-    archived: bool | None = None
-
-
 def parse_date(value: str) -> str:
     try:
         return date.fromisoformat(value).isoformat()
@@ -593,8 +577,14 @@ def admin_overview(x_telegram_init_data: str | None = Header(default=None)):
     result = {
         "students": c.execute("SELECT COUNT(*) n FROM students").fetchone()["n"],
         "authorized": c.execute("SELECT COUNT(*) n FROM students WHERE telegram_id IS NOT NULL").fetchone()["n"],
+        "disciplines": c.execute("SELECT COUNT(*) n FROM disciplines WHERE active=1").fetchone()["n"],
         "active_homework": c.execute("SELECT COUNT(*) n FROM homework WHERE hidden=0 AND archived=0").fetchone()["n"],
+        "archived_homework": c.execute("SELECT COUNT(*) n FROM homework WHERE archived=1").fetchone()["n"],
         "grades": c.execute("SELECT COUNT(*) n FROM grades").fetchone()["n"],
+        "textbooks": c.execute("SELECT COUNT(*) n FROM textbooks").fetchone()["n"],
+        "materials": c.execute("SELECT COUNT(*) n FROM additional_materials").fetchone()["n"],
+        "schedule_days": c.execute("SELECT COUNT(*) n FROM schedule_days").fetchone()["n"],
+        "schedule_lessons": c.execute("SELECT COUNT(*) n FROM schedule_lessons").fetchone()["n"],
         "events": c.execute("SELECT COUNT(*) n FROM event_feed").fetchone()["n"],
     }
     c.close()
@@ -632,115 +622,6 @@ def admin_students(x_telegram_init_data: str | None = Header(default=None)):
     c.close()
     return {"items": [dict(x) for x in rows]}
 
-
-
-@app.patch("/api/admin/students/{student_id}")
-def patch_admin_student(student_id: int, payload: AdminStudentPatch, x_telegram_init_data: str | None = Header(default=None)):
-    current_user(x_telegram_init_data, admin=True)
-    fields=[]; values=[]
-    if payload.full_name is not None:
-        name=payload.full_name.strip()
-        if not name: raise HTTPException(400, "ФИО не может быть пустым.")
-        fields.append("full_name=?"); values.append(name)
-    if payload.telegram_id is not None:
-        fields.append("telegram_id=?"); values.append(payload.telegram_id or None)
-    if not fields: return {"ok": True}
-    c=db()
-    try:
-        values.append(student_id)
-        c.execute(f"UPDATE students SET {','.join(fields)} WHERE id=?", values)
-        if c.rowcount == 0: raise HTTPException(404, "Студент не найден.")
-        c.commit()
-    finally: c.close()
-    return {"ok": True}
-
-@app.delete("/api/admin/students/{student_id}")
-def delete_admin_student(student_id: int, x_telegram_init_data: str | None = Header(default=None)):
-    current_user(x_telegram_init_data, admin=True)
-    c=db(); row=c.execute("SELECT telegram_id FROM students WHERE id=?", (student_id,)).fetchone()
-    if not row: c.close(); raise HTTPException(404, "Студент не найден.")
-    c.execute("DELETE FROM students WHERE id=?", (student_id,))
-    c.commit(); c.close()
-    return {"ok": True}
-
-@app.get("/api/admin/vip")
-def admin_vip(x_telegram_init_data: str | None = Header(default=None)):
-    current_user(x_telegram_init_data, admin=True)
-    c=db()
-    rows=c.execute("""SELECT s.id,s.full_name,s.telegram_id,
-        CASE WHEN v.telegram_id IS NULL THEN 0 ELSE 1 END is_vip
-        FROM students s LEFT JOIN vip_users v ON v.telegram_id=s.telegram_id
-        ORDER BY s.full_name""").fetchall()
-    c.close()
-    return {"items":[dict(x) for x in rows]}
-
-@app.post("/api/admin/vip/{telegram_id}/toggle")
-def toggle_vip(telegram_id: int, x_telegram_init_data: str | None = Header(default=None)):
-    current_user(x_telegram_init_data, admin=True)
-    c=db(); s=c.execute("SELECT full_name FROM students WHERE telegram_id=?", (telegram_id,)).fetchone()
-    if not s: c.close(); raise HTTPException(404,"Студент не найден.")
-    exists=c.execute("SELECT 1 FROM vip_users WHERE telegram_id=?", (telegram_id,)).fetchone()
-    if exists: c.execute("DELETE FROM vip_users WHERE telegram_id=?", (telegram_id,))
-    else: c.execute("INSERT INTO vip_users(telegram_id,full_name,added_at) VALUES(?,?,?)",(telegram_id,s["full_name"],datetime.now(TIMEZONE).isoformat()))
-    c.commit(); c.close()
-    return {"ok":True,"is_vip":not bool(exists)}
-
-@app.post("/api/admin/disciplines")
-def create_admin_discipline(payload: AdminDisciplineIn, x_telegram_init_data: str | None = Header(default=None)):
-    current_user(x_telegram_init_data, admin=True)
-    c=db(); cur=c.execute("INSERT INTO disciplines(name,emoji,active,textbooks_enabled) VALUES(?,?,1,1)",(payload.name.strip(),payload.emoji.strip() or "📚"))
-    c.commit(); did=cur.lastrowid; c.close()
-    return {"ok":True,"id":did}
-
-@app.patch("/api/admin/disciplines/{discipline_id}")
-def patch_admin_discipline(discipline_id: int, payload: AdminDisciplineIn, x_telegram_init_data: str | None = Header(default=None)):
-    current_user(x_telegram_init_data, admin=True)
-    c=db(); c.execute("UPDATE disciplines SET name=?,emoji=? WHERE id=?",(payload.name.strip(),payload.emoji.strip() or "📚",discipline_id))
-    if c.rowcount==0: c.close(); raise HTTPException(404,"Дисциплина не найдена.")
-    c.commit(); c.close(); return {"ok":True}
-
-@app.delete("/api/admin/disciplines/{discipline_id}")
-def delete_admin_discipline(discipline_id: int, x_telegram_init_data: str | None = Header(default=None)):
-    current_user(x_telegram_init_data, admin=True)
-    c=db(); row=c.execute("SELECT id FROM disciplines WHERE id=?",(discipline_id,)).fetchone()
-    if not row: c.close(); raise HTTPException(404,"Дисциплина не найдена.")
-    c.execute("DELETE FROM disciplines WHERE id=?",(discipline_id,)); c.commit(); c.close()
-    return {"ok":True}
-
-@app.get("/api/admin/homework")
-def admin_homework(x_telegram_init_data: str | None = Header(default=None)):
-    current_user(x_telegram_init_data, admin=True)
-    c=db()
-    rows=c.execute("""SELECT h.id,h.discipline_id,h.text,h.explanation,h.published_date,h.due_date,h.archived,
-        d.name discipline,d.emoji,COALESCE(e.title,substr(h.text,1,60)) title
-        FROM homework h JOIN disciplines d ON d.id=h.discipline_id
-        LEFT JOIN homework_extra e ON e.homework_id=h.id
-        ORDER BY h.archived, h.id DESC""").fetchall()
-    c.close(); return {"items":[dict(x) for x in rows]}
-
-@app.patch("/api/admin/homework/{homework_id}")
-def patch_admin_homework(homework_id: int, payload: AdminHomeworkPatch, x_telegram_init_data: str | None = Header(default=None)):
-    current_user(x_telegram_init_data, admin=True)
-    fields=[]; values=[]
-    if payload.text is not None: fields.append("text=?"); values.append(payload.text)
-    if payload.explanation is not None: fields.append("explanation=?"); values.append(payload.explanation)
-    if payload.due_date is not None: fields.append("due_date=?"); values.append(parse_hw_date(payload.due_date))
-    if payload.archived is not None: fields.append("archived=?"); values.append(1 if payload.archived else 0)
-    c=db()
-    if fields:
-        values.append(homework_id); c.execute(f"UPDATE homework SET {','.join(fields)} WHERE id=?",values)
-    if payload.title is not None:
-        c.execute("INSERT INTO homework_extra(homework_id,title) VALUES(?,?) ON CONFLICT(homework_id) DO UPDATE SET title=excluded.title",(homework_id,payload.title.strip()))
-    if c.rowcount == 0 and not payload.title: c.close(); raise HTTPException(404,"ДЗ не найдено.")
-    c.commit(); c.close(); return {"ok":True}
-
-@app.delete("/api/admin/homework/{homework_id}")
-def delete_admin_homework(homework_id: int, x_telegram_init_data: str | None = Header(default=None)):
-    current_user(x_telegram_init_data, admin=True)
-    c=db(); row=c.execute("SELECT id FROM homework WHERE id=?",(homework_id,)).fetchone()
-    if not row: c.close(); raise HTTPException(404,"ДЗ не найдено.")
-    c.execute("DELETE FROM homework WHERE id=?",(homework_id,)); c.commit(); c.close()
-    return {"ok":True}
 
 @app.get("/api/admin/google-grades/status")
 def google_grades_status(x_telegram_init_data: str | None = Header(default=None)):
@@ -788,47 +669,6 @@ async def create_homework(payload: HomeworkCreateIn, x_telegram_init_data: str |
     return {"ok":True,"homework_id":hid,"waiting_for_file":payload.wants_file}
 
 
-
-def is_vip_web(uid: int) -> bool:
-    c=db()
-    row=c.execute("SELECT 1 FROM vip_users WHERE telegram_id=?", (uid,)).fetchone()
-    c.close()
-    return bool(row)
-
-
-@app.get("/api/homework/{homework_id}/answer")
-def homework_answer(homework_id: int, x_telegram_init_data: str | None = Header(default=None)):
-    uid, student, _, _ = current_user(x_telegram_init_data)
-    if not is_vip_web(uid):
-        raise HTTPException(403, "Готовые ответы доступны только VIP-пользователям.")
-    c=db()
-    a=c.execute("SELECT kind,text,file_id,caption FROM homework_answer WHERE homework_id=?", (homework_id,)).fetchone()
-    c.close()
-    if not a:
-        raise HTTPException(404, "Готовое решение ещё не опубликовано.")
-    return dict(a)
-
-
-@app.post("/api/homework/{homework_id}/answer/send")
-async def send_homework_answer(homework_id: int, x_telegram_init_data: str | None = Header(default=None)):
-    uid, _, _, _ = current_user(x_telegram_init_data)
-    if not is_vip_web(uid):
-        raise HTTPException(403, "Готовые ответы доступны только VIP-пользователям.")
-    c=db()
-    a=c.execute("SELECT kind,text,file_id,caption FROM homework_answer WHERE homework_id=?", (homework_id,)).fetchone()
-    c.close()
-    if not a: raise HTTPException(404, "Готовое решение ещё не опубликовано.")
-    async with httpx.AsyncClient(timeout=20) as client:
-        if a["text"]:
-            r=await client.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage",data={"chat_id":uid,"text":"💡 <b>Готовый ответ</b>\n\n"+a["text"],"parse_mode":"HTML"})
-        else:
-            method="sendPhoto" if a["kind"]=="photo" else "sendDocument"
-            field="photo" if method=="sendPhoto" else "document"
-            r=await client.post(f"https://api.telegram.org/bot{TOKEN}/{method}",data={"chat_id":uid,field:a["file_id"],"caption":a["caption"] or "💡 Готовый ответ"})
-    if r.status_code>=400 or not r.json().get("ok"):
-        raise HTTPException(502,"Telegram не смог отправить ответ.")
-    return {"ok":True}
-
 @app.get("/api/textbooks")
 def textbooks(x_telegram_init_data: str | None = Header(default=None)):
     current_user(x_telegram_init_data)
@@ -849,51 +689,6 @@ async def send_textbook(textbook_id: int, x_telegram_init_data: str | None = Hea
     if r.status_code>=400 or not r.json().get("ok"): raise HTTPException(502,"Telegram не смог отправить учебник.")
     return {"ok":True}
 
-
-
-@app.get("/api/admin/textbooks")
-def admin_textbooks(x_telegram_init_data: str | None = Header(default=None)):
-    current_user(x_telegram_init_data, admin=True)
-    c=db(); rows=c.execute("""SELECT t.id,t.title,t.kind,t.discipline_id,d.name discipline,d.emoji
-        FROM textbooks t JOIN disciplines d ON d.id=t.discipline_id ORDER BY d.name,t.title""").fetchall(); c.close()
-    return {"items":[dict(x) for x in rows]}
-
-class AdminTextbookPatch(BaseModel):
-    title: str = Field(min_length=1, max_length=300)
-
-@app.patch("/api/admin/textbooks/{textbook_id}")
-def patch_admin_textbook(textbook_id:int,payload:AdminTextbookPatch,x_telegram_init_data:str|None=Header(default=None)):
-    current_user(x_telegram_init_data,admin=True)
-    c=db(); c.execute("UPDATE textbooks SET title=? WHERE id=?",(payload.title.strip(),textbook_id))
-    if c.rowcount==0: c.close(); raise HTTPException(404,"Учебник не найден.")
-    c.commit(); c.close(); return {"ok":True}
-
-@app.delete("/api/admin/textbooks/{textbook_id}")
-def delete_admin_textbook(textbook_id:int,x_telegram_init_data:str|None=Header(default=None)):
-    current_user(x_telegram_init_data,admin=True)
-    c=db(); c.execute("DELETE FROM textbooks WHERE id=?",(textbook_id,))
-    if c.rowcount==0: c.close(); raise HTTPException(404,"Учебник не найден.")
-    c.commit(); c.close(); return {"ok":True}
-
-@app.get("/api/materials")
-def materials(x_telegram_init_data:str|None=Header(default=None)):
-    current_user(x_telegram_init_data)
-    c=db(); rows=c.execute("""SELECT m.id,m.title,m.kind,m.caption,m.discipline_id,d.name discipline,d.emoji
-        FROM additional_materials m JOIN disciplines d ON d.id=m.discipline_id
-        WHERE d.active=1 ORDER BY d.name,m.id DESC""").fetchall(); c.close()
-    return {"items":[dict(x) for x in rows]}
-
-@app.post("/api/materials/{material_id}/send")
-async def send_standalone_material(material_id:int,x_telegram_init_data:str|None=Header(default=None)):
-    uid,_,_,_=current_user(x_telegram_init_data)
-    c=db(); item=c.execute("SELECT m.*,d.name discipline FROM additional_materials m JOIN disciplines d ON d.id=m.discipline_id WHERE m.id=?",(material_id,)).fetchone(); c.close()
-    if not item: raise HTTPException(404,"Материал не найден.")
-    method={"photo":"sendPhoto","video":"sendVideo"}.get(item["kind"],"sendDocument")
-    field={"sendPhoto":"photo","sendVideo":"video"}.get(method,"document")
-    payload={"chat_id":uid,field:item["file_id"],"caption":item["caption"] or f"📎 {item['discipline']} — {item['title']}"}
-    async with httpx.AsyncClient(timeout=20) as client: r=await client.post(f"https://api.telegram.org/bot{TOKEN}/{method}",data=payload)
-    if r.status_code>=400 or not r.json().get("ok"): raise HTTPException(502,"Telegram не смог отправить материал.")
-    return {"ok":True}
 
 @app.get("/api/admin/schedule/{day}")
 def admin_schedule(day: str, x_telegram_init_data: str | None = Header(default=None)):

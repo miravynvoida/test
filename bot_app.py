@@ -147,7 +147,7 @@ async def edit_or_answer(call, text, markup=None):
     return await show(call.bot, call.from_user.id, text, markup)
 
 
-def main_kb():
+def main_kb(uid=None):
     rows = [
         [b("📅 Расписание","menu:schedule"), b("📝 Домашнее задание","menu:hw")],
         [b("📚 Учебники","menu:books"), b("⚙️ Настройки","menu:settings")],
@@ -156,6 +156,8 @@ def main_kb():
         rows.append([InlineKeyboardButton(text="📖 Электронный дневник", web_app=WebAppInfo(url=MINI_APP_URL))])
     else:
         rows.append([b("👤 Личный кабинет","menu:soon")])
+    if uid is not None and is_admin(uid):
+        rows.append([b("🛠 Админ панель","menu:admin")])
     rows.append([InlineKeyboardButton(text="❓ Помощь", url=f"https://t.me/{HELP_USERNAME.lstrip('@')}")])
     return ik(rows)
 
@@ -186,7 +188,7 @@ async def main_menu(bot, uid, name=None):
             text += f"⏳ <b>Следующая пара</b>\n\n<b>{x['start']}–{x['end']} — {x['lesson_no']} пара | {x['lesson_type']}</b>\n{x['emoji']} <b>{x['discipline']}</b>\n{teacher} • ауд. {x['room']}\n\n⏱ Через <b>{mins} мин.</b>"
     else:
         text += "🌙 <b>На сегодня пар больше нет.</b>" if lessons else "💤 <b>Сегодня занятий нет.</b>"
-    return await show(bot,uid,text,main_kb())
+    return await show(bot,uid,text,main_kb(uid))
 
 class Auth(StatesGroup): name=State()
 class HWCreate(StatesGroup): discipline=State(); title=State(); task=State(); due=State(); explanation=State(); media=State(); preview=State()
@@ -233,6 +235,11 @@ async def info(m:Message):
     name=is_auth(m.from_user.id); n=name["full_name"] if name else "не авторизован"
     await m.answer(f"ℹ️ <b>Информация о боте</b>\n\n🤖 Инфо-бот Р-26-1\n📦 Версия: <b>{VERSION}</b>\n\n👤 <b>Пользователь</b>\n📝 ФИО: {n}\n🆔 Telegram ID: <code>{m.from_user.id}</code>\n\n💬 Помощь: {HELP_USERNAME}")
 
+@router.callback_query(F.data=="menu:admin")
+async def menu_admin(c:CallbackQuery,state:FSMContext):
+    if not await admin_only(c): return
+    await state.clear(); await c.answer(); await edit_or_answer(c,"🛠 <b>Админ-панель</b>\\n\\nВыберите действие:",admin_kb())
+
 @router.callback_query(F.data=="menu:soon")
 async def soon(c:CallbackQuery):
     student=is_auth(c.from_user.id)
@@ -268,7 +275,7 @@ async def home(c:CallbackQuery): await c.answer(); await main_menu(c.bot,c.from_
 # Schedule
 @router.callback_query(F.data=="menu:schedule")
 async def schedule_menu(c:CallbackQuery):
-    await c.answer(); await edit_or_answer(c,"📅 <b>Расписание</b>\n\nВыберите период для показа расписания.\n\n✅ — пара уже прошла\n🔴 — пара идёт сейчас\n⏳ — пара скоро начнётся",ik([[b("📌 Сегодня","sch:day:0"),b("➡️ Завтра","sch:day:1")],[b("🗓 Выбрать день","sch:cal:2026:9")],[b("🏠 Назад","menu:home")]]))
+    await c.answer(); await edit_or_answer(c,"📅 <b>Расписание</b>\n\nВыберите период для показа расписания.\n\n✅ — пара уже прошла\n🔴 — пара идёт сейчас\n⏳ — пара скоро начнётся",ik([[b("📌 Сегодня","sch:day:0"),b("➡️ Завтра","sch:day:1")], [b("🗓 Выбрать день",f"sch:cal:{datetime.now(TZ).year}:{datetime.now(TZ).month}")],[b("🏠 Назад","menu:home")]]))
 
 def day_str(d):
     return d.strftime('%Y-%m-%d')
@@ -357,13 +364,13 @@ def calendar_kb(year,month,prefix='sch'):
         for n in w:
             if not n: row.append(b(" ","noop")); continue
             d=date(year,month,n)
-            label=f"⭐{n}" if d==today else str(n)
+            label=f"*{n}" if d==today else str(n)
             if date(2026,9,1)<=d<=date(2027,7,31) and not (prefix == "sch" and d.weekday() == 6):
                 row.append(b(label,f"{prefix}:date:{d.isoformat()}"))
             else:
                 row.append(b("—" if prefix == "sch" and d.weekday() == 6 else label,"noop"))
         rows.append(row)
-    back_callback = "adm:schedule" if prefix == "asch" else "menu:schedule"
+    back_callback = "adm:back" if prefix == "asch" else "menu:schedule"
     rows.append([b("🏠 Назад", back_callback)])
     return ik(rows)
 
@@ -566,14 +573,10 @@ async def admin_only(c):
 def admin_kb():
     rows = [[b("📊 Обзор и статистика","adm:dashboard")],[b("📝 Новое ДЗ","adm:newhw")],[b("🛠 Управление ДЗ","adm:hw")],[b("📚 Управление учебниками","adm:books")],[b("📎 Доп. материалы","adm:materials")],[b("📅 Управление расписанием","adm:schedule")],[b("👥 Управление студентами","adm:students")],[b("⭐ Управление VIP","adm:vip")],[b("📖 Дисциплины","adm:disc")],[b("📢 Уведомление всем","adm:broadcast")]]
     if MINI_APP_URL:
-        rows.append([InlineKeyboardButton(text="🛠 Админ-панель Mini App", web_app=WebAppInfo(url=MINI_APP_URL + "?admin=1") )])
+        rows.append([InlineKeyboardButton(text="🛠 Админ-панель Mini App", web_app=WebAppInfo(url=MINI_APP_URL + ("&" if "?" in MINI_APP_URL else "?") + "admin=1") )])
     rows.append([b("🏠 Главное меню","menu:home")])
     return ik(rows)
 
-@router.message(Command("admin"))
-async def admin(m:Message):
-    if not is_admin(m.from_user.id): return await m.answer("⛔ Доступ запрещён.")
-    await show(m.bot,m.from_user.id,"🛠 <b>Админ-панель</b>\n\nВыберите действие:",admin_kb())
 @router.callback_query(F.data.startswith("adm:"))
 async def admin_router(c:CallbackQuery,state:FSMContext):
     if not await admin_only(c): return
@@ -665,7 +668,9 @@ async def receive_miniapp_homework_file(m: Message):
 async def newhw_media(m,state):
     x=media_info(m)
     if not x: return await m.answer("Пришли документ/фото/видео или нажми «Готово».")
-    data=await state.get_data(); arr=data.get('media',[]);arr.append(x);await state.update_data(media=arr);await m.answer(f"✅ Файл добавлен. Всего: {len(arr)}. Можно отправить ещё или нажать «Готово»." )
+    data=await state.get_data(); arr=data.get('media',[]);arr.append(x);await state.update_data(media=arr)
+    # Keep the control message below the newly attached file.
+    await show(m.bot,m.from_user.id,f"✅ Файл добавлен. Всего: {len(arr)}. Можно отправить ещё или нажать «Готово».",ik([[b("Без файлов","newhw:no_media")],[b("Готово","newhw:done_media")]]))
 @router.callback_query(F.data.in_({"newhw:no_media","newhw:done_media"}),HWCreate.media)
 async def newhw_preview(c,state):
     data=await state.get_data();cc=db();d=cc.execute("SELECT * FROM disciplines WHERE id=?",(data['discipline'],)).fetchone();cc.close(); txt=f"📝 <b>Предпросмотр ДЗ</b>\n\n{d['emoji']} <b>{d['name']}</b>\n<b>{data['title']}</b>\n\n{data['task']}\n\n📅 Сдать до: {data['due']}\n📤 Опубликовано: {date.today().strftime('%d.%m.%Y')}\n\n💬 {data['explanation'] or 'Без пояснения'}\n\n📎 Файлов: {len(data.get('media',[]))}";await state.set_state(HWCreate.preview);await c.answer();await edit_or_answer(c,txt,ik([[b("✅ Опубликовать","newhw:publish")],[b("🔄 Заполнить заново","adm:newhw")],[b("❌ Отмена","adm:back")]]))
@@ -697,29 +702,116 @@ async def admin_hw(c):
 @router.callback_query(F.data.startswith("ahwd:"))
 async def ahwd(c):
     _,did,p=c.data.split(':');did=int(did);p=int(p);cc=db();d=cc.execute("SELECT * FROM disciplines WHERE id=?",(did,)).fetchone();hs=cc.execute("SELECT h.*,COALESCE(e.title,substr(h.text,1,60)) title FROM homework h LEFT JOIN homework_extra e ON e.homework_id=h.id WHERE h.discipline_id=? AND h.archived=0 ORDER BY substr(h.published_date,7,4)||substr(h.published_date,4,2)||substr(h.published_date,1,2), h.id",(did,)).fetchall();cc.close();rows=[[b(f"📝 {h['title'][:45]} • {h['due_date']}",f"ahwi:{h['id']}:{did}:{p}")] for h in hs[p*7:p*7+7]];rows.append([b("📦 Архив",f"ahwa:{did}:0")]);rows.append([b("🔙 Назад","adm:hw")]);await c.answer();await edit_or_answer(c,f"{d['emoji']} <b>{d['name']}</b>",ik(rows))
+async def ahwd_for(c:CallbackQuery,did:int,p:int):
+    cc=db()
+    d=cc.execute("SELECT * FROM disciplines WHERE id=?",(did,)).fetchone()
+    hs=cc.execute("SELECT h.*,COALESCE(e.title,substr(h.text,1,60)) title FROM homework h LEFT JOIN homework_extra e ON e.homework_id=h.id WHERE h.discipline_id=? AND h.archived=0 ORDER BY substr(h.published_date,7,4)||substr(h.published_date,4,2)||substr(h.published_date,1,2), h.id",(did,)).fetchall()
+    cc.close()
+    if not d:
+        return await edit_or_answer(c,"❌ Дисциплина не найдена.",ik([[b("🔙 Админ-панель","adm:back")]]))
+    rows=[[b(f"📝 {h['title'][:45]} • {h['due_date']}",f"ahwi:{h['id']}:{did}:{p}")] for h in hs[p*7:p*7+7]]
+    rows.append([b("📦 Архив",f"ahwa:{did}:0")]); rows.append([b("🔙 Назад","adm:hw")])
+    await edit_or_answer(c,f"{d['emoji']} <b>{d['name']}</b>",ik(rows))
+
+async def ahwa_for(c:CallbackQuery,did:int,p:int):
+    cc=db()
+    d=cc.execute("SELECT * FROM disciplines WHERE id=?",(did,)).fetchone()
+    hs=cc.execute("SELECT h.*,COALESCE(e.title,substr(h.text,1,60)) title FROM homework h LEFT JOIN homework_extra e ON e.homework_id=h.id WHERE h.discipline_id=? AND h.archived=1 ORDER BY substr(h.published_date,7,4)||substr(h.published_date,4,2)||substr(h.published_date,1,2), h.id",(did,)).fetchall()
+    cc.close()
+    if not d:
+        return await edit_or_answer(c,"❌ Дисциплина не найдена.",ik([[b("🔙 Админ-панель","adm:back")]]))
+    rows=[[b(f"📦 {h['title'][:45]} • {h['due_date']}",f"ahwiarch:{h['id']}:{did}:{p}")] for h in hs[p*7:p*7+7]]
+    rows.append([b("🔙 Назад",f"ahwd:{did}:0")])
+    await edit_or_answer(c,f"📦 <b>Архив — {d['name']}</b>",ik(rows))
+
 @router.callback_query(F.data.startswith("ahwa:"))
 async def ahwa(c:CallbackQuery):
-    _,did,p=c.data.split(':'); did=int(did); p=int(p); cc=db(); d=cc.execute("SELECT * FROM disciplines WHERE id=?",(did,)).fetchone(); hs=cc.execute("SELECT h.*,COALESCE(e.title,substr(h.text,1,60)) title FROM homework h LEFT JOIN homework_extra e ON e.homework_id=h.id WHERE h.discipline_id=? AND h.archived=1 ORDER BY substr(h.published_date,7,4)||substr(h.published_date,4,2)||substr(h.published_date,1,2), h.id",(did,)).fetchall(); cc.close()
+    _,did,p=c.data.split(':'); did=int(did); p=int(p)
+    cc=db(); d=cc.execute("SELECT * FROM disciplines WHERE id=?",(did,)).fetchone()
+    hs=cc.execute("SELECT h.*,COALESCE(e.title,substr(h.text,1,60)) title FROM homework h LEFT JOIN homework_extra e ON e.homework_id=h.id WHERE h.discipline_id=? AND h.archived=1 ORDER BY substr(h.published_date,7,4)||substr(h.published_date,4,2)||substr(h.published_date,1,2), h.id",(did,)).fetchall()
+    cc.close()
+    if not d:
+        await c.answer("Дисциплина не найдена",show_alert=True); return
     rows=[[b(f"📦 {h['title'][:45]} • {h['due_date']}",f"ahwiarch:{h['id']}:{did}:{p}")] for h in hs[p*7:p*7+7]]
-    rows.append([b("🔙 Назад",f"ahwd:{did}:0")]); await c.answer(); await edit_or_answer(c,f"📦 <b>Архив — {d['name']}</b>",ik(rows))
+    rows.append([b("🔙 Назад",f"ahwd:{did}:0")])
+    await c.answer()
+    await edit_or_answer(c,f"📦 <b>Архив — {d['name']}</b>",ik(rows))
+
 @router.callback_query(F.data.startswith("ahwiarch:"))
 async def ahwiarch(c:CallbackQuery):
-    _,hid,did,p=c.data.split(':'); cc=db(); h=cc.execute("SELECT h.*,d.name discipline,d.emoji FROM homework h JOIN disciplines d ON d.id=h.discipline_id WHERE h.id=?",(hid,)).fetchone(); cc.close(); await c.answer(); await edit_or_answer(c,f"📦 {h['emoji']} <b>{h['discipline']}</b>\n\n{h['text']}\n\n📅 {h['due_date']}",ik([[b("♻️ Вернуть из архива",f"ahwunarch:{hid}:{did}:{p}")],[b("🗑 Удалить",f"ahwdel:{hid}:{did}:{p}")],[b("🔙 Назад",f"ahwa:{did}:{p}")]]))
+    _,hid,did,p=c.data.split(':')
+    cc=db()
+    h=cc.execute("SELECT h.*,d.name discipline,d.emoji FROM homework h JOIN disciplines d ON d.id=h.discipline_id WHERE h.id=?",(hid,)).fetchone()
+    ex=cc.execute("SELECT title FROM homework_extra WHERE homework_id=?",(hid,)).fetchone()
+    media=cc.execute("SELECT id,kind,caption,file_id FROM homework_media WHERE homework_id=? ORDER BY id",(hid,)).fetchall()
+    cc.close()
+    if not h:
+        await c.answer("ДЗ уже удалено.",show_alert=True)
+        return await ahwa(c)
+    title=ex['title'] if ex and ex['title'] else ((h['text'] or 'Задание').splitlines()[0] if h['text'] else 'Задание')
+    text=f"📦 {h['emoji']} <b>{h['discipline']}</b>\n\n<b>{title}</b>\n{h['text'] or '—'}\n\n📅 {h['due_date']}"
+    buttons=[[b("♻️ Вернуть из архива",f"ahwunarch:{hid}:{did}:{p}")],
+             [b("🗑 Удалить",f"ahwdelarch:{hid}:{did}:{p}")],
+             [b("🔙 Назад",f"ahwa:{did}:{p}")]]
+    if media:
+        try:
+            if c.message: await c.message.delete()
+        except Exception: pass
+        for m in media:
+            try:
+                cap=m['caption'] or title
+                if m['kind']=='photo': await c.bot.send_photo(c.from_user.id,m['file_id'],caption=cap)
+                elif m['kind']=='video': await c.bot.send_video(c.from_user.id,m['file_id'],caption=cap)
+                else: await c.bot.send_document(c.from_user.id,m['file_id'],caption=cap)
+            except Exception: pass
+        await show(c.bot,c.from_user.id,text,ik(buttons))
+    else:
+        await c.answer()
+        await edit_or_answer(c,text,ik(buttons))
+
 @router.callback_query(F.data.startswith("ahwunarch:"))
 async def ahwunarch(c:CallbackQuery):
-    _,hid,did,p=c.data.split(':'); cc=db(); cc.execute("UPDATE homework SET archived=0 WHERE id=?",(hid,)); cc.commit(); cc.close(); await c.answer("Возвращено из архива"); await ahwa(c)
+    _,hid,did,p=c.data.split(':')
+    cc=db(); cc.execute("UPDATE homework SET archived=0 WHERE id=?",(hid,)); cc.commit(); cc.close()
+    await c.answer("Возвращено из архива")
+    await ahwa(c)
+
+async def _render_homework_admin(c:CallbackQuery,hid:int,did:int,p:int):
+    await c.answer()
+    cc=db()
+    h=cc.execute("SELECT h.*,d.name discipline,d.emoji FROM homework h JOIN disciplines d ON d.id=h.discipline_id WHERE h.id=?",(hid,)).fetchone()
+    ex=cc.execute("SELECT title FROM homework_extra WHERE homework_id=?",(hid,)).fetchone()
+    media=cc.execute("SELECT id,kind,caption,file_id FROM homework_media WHERE homework_id=? ORDER BY id",(hid,)).fetchall()
+    cc.close()
+    if not h:
+        await c.answer("ДЗ уже удалено.",show_alert=True)
+        return await ahwd(c)
+    title=ex['title'] if ex and ex['title'] else ((h['text'] or 'Задание').splitlines()[0] if h['text'] else 'Задание')
+    text=f"{h['emoji']} <b>{h['discipline']}</b>\n\n<b>{title}</b>\n{h['text'] or '—'}\n\n📅 {h['due_date']}\n📤 {h['published_date']}\n💬 {h['explanation'] or '—'}"
+    buttons=[[b("✏️ Редактировать",f"ahwe:{hid}")],
+             [b("📎 Управление файлами",f"ahwmedia:{hid}:{did}:{p}:0")],
+             [b("🗑 Удалить",f"ahwdel:{hid}:{did}:{p}")],
+             [b("📦 В архив",f"ahwarch:{hid}:{did}:{p}")],
+             [b("🔙 Назад",f"ahwd:{did}:{p}")]]
+    if media:
+        try:
+            if c.message: await c.message.delete()
+        except Exception: pass
+        for m in media:
+            try:
+                cap=m['caption'] or title
+                if m['kind']=='photo': await c.bot.send_photo(c.from_user.id,m['file_id'],caption=cap)
+                elif m['kind']=='video': await c.bot.send_video(c.from_user.id,m['file_id'],caption=cap)
+                else: await c.bot.send_document(c.from_user.id,m['file_id'],caption=cap)
+            except Exception: pass
+        await show(c.bot,c.from_user.id,text,ik(buttons))
+    else:
+        await edit_or_answer(c,text,ik(buttons))
 
 @router.callback_query(F.data.startswith("ahwi:"))
 async def ahwi(c:CallbackQuery):
     _,hid,did,p=c.data.split(':')
-    cc=db(); h=cc.execute("SELECT h.*,d.name discipline,d.emoji FROM homework h JOIN disciplines d ON d.id=h.discipline_id WHERE h.id=?",(hid,)).fetchone(); ex=cc.execute("SELECT title FROM homework_extra WHERE homework_id=?",(hid,)).fetchone(); cc.close()
-    await c.answer()
-    title=ex['title'] if ex else h['text'].splitlines()[0]
-    txt=f"{h['emoji']} <b>{h['discipline']}</b>\n\n<b>{title}</b>\n{h['text']}\n\n📅 {h['due_date']}\n📤 {h['published_date']}\n💬 {h['explanation'] or '—'}"
-    cc=db(); media=cc.execute("SELECT id,kind,caption FROM homework_media WHERE homework_id=? ORDER BY id",(hid,)).fetchall(); cc.close()
-    media_buttons=[[b(f"📎 {i+1}. {m['caption'] or m['kind']}",f"ahwmedia:{hid}:{did}:{p}:{m['id']}")] for i,m in enumerate(media)]
-    buttons=[[b("✏️ Редактировать",f"ahwe:{hid}")],[b("📎 Управление файлами",f"ahwmedia:{hid}:{did}:{p}:0")],[b("🗑 Удалить",f"ahwdel:{hid}:{did}:{p}")],[b("📦 В архив",f"ahwarch:{hid}:{did}:{p}")],[b("🔙 Назад",f"ahwd:{did}:{p}")]]
-    await edit_or_answer(c,txt,ik(buttons))
+    await _render_homework_admin(c,int(hid),int(did),int(p))
 
 @router.callback_query(F.data.startswith("ahwmedia:"))
 async def ahwmedia(c):
@@ -737,35 +829,37 @@ async def ahwmedia_del(c):
     cc=db(); cc.execute("DELETE FROM homework_media WHERE id=? AND homework_id=?",(mid,hid)); cc.commit(); cc.close()
     await c.answer("Файл удалён")
     cc=db(); rows=cc.execute("SELECT id,kind,caption FROM homework_media WHERE homework_id=? ORDER BY id",(hid,)).fetchall(); cc.close()
-    buttons=[[b(f"🗑 {i+1}. {m['caption'] or m['kind']}",f"ahwmedia:{hid}:{did}:{p}:{m['id']}")] for i,m in enumerate(rows)]
+    buttons=[[b(f"🗑 {i+1}. {m['caption'] or m['kind']}",f"ahwmedia:{hid}:{did}:{p}:{m['id']}")] for m in rows]
     buttons.append([b("➕ Добавить файл",f"ahwe:{hid}")]); buttons.append([b("🔙 Назад",f"ahwi:{hid}:{did}:{p}")])
     await edit_or_answer(c,"📎 <b>Файлы ДЗ</b>\n\nНажмите на файл, чтобы удалить его.",ik(buttons))
+
 @router.callback_query(F.data.startswith("ahwdel:"))
 async def ahwdel(c):
-    _,hid,did,p=c.data.split(':');await c.answer();await edit_or_answer(c,"⚠️ <b>Удалить ДЗ безвозвратно?</b>\nЭто удалит и прикреплённые файлы, и готовый ответ.",ik([[b("🗑 Да, удалить",f"ahwdelok:{hid}:{did}:{p}")],[b("❌ Отмена",f"ahwi:{hid}:{did}:{p}")]]))
+    _,hid,did,p=c.data.split(':')
+    await c.answer()
+    await edit_or_answer(c,"⚠️ <b>Удалить ДЗ безвозвратно?</b>\nЭто удалит и прикреплённые файлы, и готовый ответ.",ik([[b("🗑 Да, удалить",f"ahwdelok:{hid}:{did}:{p}")],[b("❌ Отмена",f"ahwi:{hid}:{did}:{p}")]]))
+
 @router.callback_query(F.data.startswith("ahwdelok:"))
 async def ahwdelok(c):
     _,hid,did,p=c.data.split(':')
-    cc=db()
-    cc.execute("DELETE FROM homework WHERE id=?",(hid,))
-    cc.commit()
-    cc.close()
+    cc=db(); cc.execute("DELETE FROM homework WHERE id=?",(hid,)); cc.commit(); cc.close()
     await c.answer("Удалено")
-    # Return to the discipline homework list with the correct callback format.
-    c.data=f"ahwd:{did}:{p}"
-    await ahwd(c)
+    # Do not mutate frozen aiogram CallbackQuery; render the target list directly.
+    await ahwd_for(c,int(did),int(p))
+
+@router.callback_query(F.data.startswith("ahwdelarch:"))
+async def ahwdelarch(c):
+    _,hid,did,p=c.data.split(':')
+    cc=db(); cc.execute("DELETE FROM homework WHERE id=?",(hid,)); cc.commit(); cc.close()
+    await c.answer("Удалено")
+    await ahwa_for(c,int(did),int(p))
 
 @router.callback_query(F.data.startswith("ahwarch:"))
 async def ahwarch(c):
     _,hid,did,p=c.data.split(':')
-    cc=db()
-    cc.execute("UPDATE homework SET archived=1 WHERE id=?",(hid,))
-    cc.commit()
-    cc.close()
+    cc=db(); cc.execute("UPDATE homework SET archived=1 WHERE id=?",(hid,)); cc.commit(); cc.close()
     await c.answer("Перемещено в архив")
-    # Return to the discipline homework list with the correct callback format.
-    c.data=f"ahwd:{did}:{p}"
-    await ahwd(c)
+    await ahwd_for(c,int(did),int(p))
 
 # Homework editor
 @router.callback_query(F.data.startswith("ahwe:"))
@@ -799,7 +893,7 @@ def parse_hw_date(value):
 @router.message(HWEdit.value)
 async def edit_value(m:Message,state:FSMContext):
     data=await state.get_data(); hid=data.get('hid'); field=data.get('field')
-    if not hid or not field: await state.clear(); return await m.answer("❌ Редактирование сброшено. Используй /admin.")
+    if not hid or not field: await state.clear(); return await m.answer("❌ Редактирование сброшено.")
     cc=db()
     if field=='answer':
         if m.document: cc.execute("INSERT INTO homework_answer(homework_id,kind,file_id) VALUES(?,?,?) ON CONFLICT(homework_id) DO UPDATE SET kind=excluded.kind,file_id=excluded.file_id,text=NULL",(hid,'document',m.document.file_id))
@@ -827,8 +921,27 @@ async def edit_value(m:Message,state:FSMContext):
 
 # Admin books
 async def admin_dashboard(c):
-    cc=db(); students=cc.execute("SELECT COUNT(*) n FROM students").fetchone()['n']; auth=cc.execute("SELECT COUNT(*) n FROM students WHERE telegram_id IS NOT NULL").fetchone()['n']; hw=cc.execute("SELECT COUNT(*) n FROM homework WHERE hidden=0 AND archived=0").fetchone()['n']; books=cc.execute("SELECT COUNT(*) n FROM textbooks").fetchone()['n']; mats=cc.execute("SELECT COUNT(*) n FROM additional_materials").fetchone()['n']; days=cc.execute("SELECT COUNT(*) n FROM schedule_days").fetchone()['n']; cc.close();
-    await c.answer(); await edit_or_answer(c,f"📊 <b>Обзор и статистика</b>\n\n👥 Студентов: <b>{students}</b>\n🟢 Авторизовано: <b>{auth}</b>\n📝 Активных ДЗ: <b>{hw}</b>\n📚 Учебников: <b>{books}</b>\n📎 Доп. материалов: <b>{mats}</b>\n📅 Дней с расписанием: <b>{days}</b>",ik([[b("🔙 Админ-панель","adm:back")]]))
+    cc=db()
+    students=cc.execute("SELECT COUNT(*) n FROM students").fetchone()['n']
+    auth=cc.execute("SELECT COUNT(*) n FROM students WHERE telegram_id IS NOT NULL").fetchone()['n']
+    disciplines=cc.execute("SELECT COUNT(*) n FROM disciplines WHERE active=1").fetchone()['n']
+    hw=cc.execute("SELECT COUNT(*) n FROM homework WHERE hidden=0 AND archived=0").fetchone()['n']
+    archived=cc.execute("SELECT COUNT(*) n FROM homework WHERE archived=1").fetchone()['n']
+    books=cc.execute("SELECT COUNT(*) n FROM textbooks").fetchone()['n']
+    mats=cc.execute("SELECT COUNT(*) n FROM additional_materials").fetchone()['n']
+    days=cc.execute("SELECT COUNT(*) n FROM schedule_days").fetchone()['n']
+    lessons=cc.execute("SELECT COUNT(*) n FROM schedule_lessons").fetchone()['n']
+    grades=cc.execute("SELECT COUNT(*) n FROM grades").fetchone()['n']
+    events=cc.execute("SELECT COUNT(*) n FROM event_feed").fetchone()['n']
+    cc.close()
+    await c.answer()
+    await edit_or_answer(c,f"📊 <b>Обзор и статистика</b>\n\n"
+        f"👥 Студентов: <b>{students}</b>\n🟢 Авторизовано: <b>{auth}</b>\n"
+        f"📖 Дисциплин: <b>{disciplines}</b>\n📝 Активных ДЗ: <b>{hw}</b>\n📦 ДЗ в архиве: <b>{archived}</b>\n"
+        f"📚 Учебников: <b>{books}</b>\n📎 Доп. материалов: <b>{mats}</b>\n"
+        f"📅 Дней с расписанием: <b>{days}</b>\n🎓 Пар в расписании: <b>{lessons}</b>\n"
+        f"📊 Оценок в кеше: <b>{grades}</b>\n🔔 Событий: <b>{events}</b>",
+        ik([[b("🔙 Админ-панель","adm:back")]]))
 
 async def admin_materials(c):
     cc=db(); ds=cc.execute("SELECT d.*,COUNT(m.id) n FROM disciplines d LEFT JOIN additional_materials m ON m.discipline_id=d.id WHERE d.active=1 GROUP BY d.id ORDER BY d.name").fetchall(); cc.close(); await c.answer(); await edit_or_answer(c,"📎 <b>Дополнительные материалы</b>\n\nВыберите дисциплину:",ik(two_col([b(f"{d['emoji']} {d['name']} ({d['n']})",f"amat:d:{d['id']}") for d in ds])+[[b("🔙 Админ-панель","adm:back")]]))
@@ -844,17 +957,38 @@ async def amat_add(c:CallbackQuery,state:FSMContext):
 @router.message(MaterialCreate.title)
 async def amat_title(m:Message,state:FSMContext):
     if not (m.text or '').strip(): return await m.answer("❌ Название не может быть пустым.")
+    data=await state.get_data()
+    if data.get('material_rename') and data.get('mid'):
+        cc=db(); cc.execute("UPDATE additional_materials SET title=? WHERE id=?",(m.text.strip(),data['mid'])); cc.commit(); cc.close(); mid=data['mid']; did=data['did']; await state.clear()
+        return await show(m.bot,m.from_user.id,"✅ Название изменено.",ik([[b("🔙 К материалу",f"amat:item:{mid}:{did}")],[b("📎 Все материалы",f"amat:d:{did}")],[b("🏠 Админ-панель","adm:back")]]))
     await state.update_data(title=m.text.strip()); await state.set_state(MaterialCreate.file); await m.answer("📎 Отправьте документ, фото или видео:")
 
 @router.message(MaterialCreate.file)
 async def amat_file(m:Message,state:FSMContext):
     x=media_info(m)
     if not x: return await m.answer("❌ Отправьте документ, фото или видео.")
-    data=await state.get_data(); cc=db(); cc.execute("INSERT INTO additional_materials(discipline_id,title,kind,file_id,caption,created_at) VALUES(?,?,?,?,?,?)",(data['did'],data['title'],x[0],x[1],x[2],datetime.now(TZ).isoformat())); cc.commit(); cc.close(); await state.clear(); await m.answer("✅ Материал добавлен.")
+    data=await state.get_data(); cc=db()
+    if data.get('material_change_file') and data.get('mid'):
+        cc.execute("UPDATE additional_materials SET kind=?,file_id=?,caption=? WHERE id=?",(x[0],x[1],x[2],data['mid'])); msg="✅ Файл материала заменён."
+    else:
+        cc.execute("INSERT INTO additional_materials(discipline_id,title,kind,file_id,caption,created_at) VALUES(?,?,?,?,?,?)",(data['did'],data['title'],x[0],x[1],x[2],datetime.now(TZ).isoformat())); msg="✅ Материал добавлен."
+    cc.commit(); cc.close(); did=data['did']; await state.clear()
+    await show(m.bot,m.from_user.id,msg,ik([[b("📎 Все материалы",f"amat:d:{did}")],[b("🏠 Админ-панель","adm:back")]]))
 
 @router.callback_query(F.data.startswith("amat:item:"))
 async def amat_item(c:CallbackQuery):
-    _,_,mid,did=c.data.split(':'); cc=db(); m=cc.execute("SELECT * FROM additional_materials WHERE id=?",(mid,)).fetchone(); cc.close(); await c.answer(); await edit_or_answer(c,f"📎 <b>{m['title']}</b>",ik([[b("🗑 Удалить",f"amat:del:{mid}:{did}")],[b("🔙 Назад",f"amat:d:{did}")]]))
+    _,_,mid,did=c.data.split(':'); cc=db(); m=cc.execute("SELECT * FROM additional_materials WHERE id=?",(mid,)).fetchone(); cc.close()
+    if not m: return await c.answer("Материал не найден.",show_alert=True)
+    await c.answer(); await edit_or_answer(c,f"📎 <b>{m['title']}</b>",ik([[b("✏️ Изменить название",f"amat:rename:{mid}:{did}")],[b("📎 Поменять файл",f"amat:file:{mid}:{did}")],[b("🗑 Удалить",f"amat:del:{mid}:{did}")],[b("🔙 Назад",f"amat:d:{did}")]]))
+
+@router.callback_query(F.data.startswith("amat:rename:"))
+async def amat_rename(c:CallbackQuery,state:FSMContext):
+    _,_,mid,did=c.data.split(':'); cc=db(); m=cc.execute("SELECT title FROM additional_materials WHERE id=?",(mid,)).fetchone(); cc.close()
+    await state.update_data(mid=int(mid),did=int(did),material_rename=True); await state.set_state(MaterialCreate.title); await c.answer(); await show(c.bot,c.from_user.id,f"✏️ Введите новое название материала:\n\n<b>{m['title'] if m else ''}</b>",ik([[b("❌ Отмена",f"amat:item:{mid}:{did}")]]))
+
+@router.callback_query(F.data.startswith("amat:file:"))
+async def amat_file_start(c:CallbackQuery,state:FSMContext):
+    _,_,mid,did=c.data.split(':'); await state.update_data(mid=int(mid),did=int(did),material_change_file=True); await state.set_state(MaterialCreate.file); await c.answer(); await show(c.bot,c.from_user.id,"📎 Отправьте новый файл дополнительного материала:",ik([[b("❌ Отмена",f"amat:item:{mid}:{did}")]]))
 
 @router.callback_query(F.data.startswith("amat:del:"))
 async def amat_del(c:CallbackQuery):
@@ -875,17 +1009,35 @@ async def abooknew(c,state): await state.set_state(BookCreate.title);await state
 @router.message(BookCreate.title)
 async def abooktitle(m,state):
     data=await state.get_data()
-    if 'bid' in data:
-        cc=db(); cc.execute("UPDATE textbooks SET title=? WHERE id=?",(m.text.strip(),data['bid'])); cc.commit(); cc.close(); await state.clear(); return await m.answer("✅ Название изменено.")
+    if 'bid' in data and not data.get('change_file'):
+        cc=db(); cc.execute("UPDATE textbooks SET title=? WHERE id=?",(m.text.strip(),data['bid'])); cc.commit(); cc.close()
+        did=data.get('did'); await state.clear()
+        cc=db(); d=cc.execute("SELECT * FROM disciplines WHERE id=?",(did,)).fetchone(); ts=cc.execute("SELECT * FROM textbooks WHERE discipline_id=? ORDER BY id",(did,)).fetchall(); cc.close()
+        rows=[[b(f"📘 {t['title'][:55]}",f"abook:{t['id']}:{did}")] for t in ts]; rows.append([b("➕ Добавить учебник",f"abooknew:{did}")]); rows.append([b("🔙 Назад","adm:books")])
+        return await show(m.bot,m.from_user.id,f"{d['emoji']} <b>{d['name']}</b>",ik(rows))
     await state.update_data(title=m.text);await state.set_state(BookCreate.file);await m.answer("Отправьте файл учебника:")
 @router.message(BookCreate.file)
 async def abookfile(m,state):
     x=media_info(m)
     if not x: return await m.answer("Нужен документ, фото или видео.")
-    data=await state.get_data();cc=db();cc.execute("INSERT INTO textbooks(discipline_id,title,kind,file_id,created_at) VALUES(?,?,?,?,?)",(data['did'],data['title'],x[0],x[1],datetime.now(TZ).isoformat()));cc.commit();cc.close();await state.clear();await m.answer("✅ Учебник добавлен.")
+    data=await state.get_data(); cc=db()
+    if data.get('change_file') and data.get('bid'):
+        cc.execute("UPDATE textbooks SET kind=?,file_id=? WHERE id=?",(x[0],x[1],data['bid']))
+        msg="✅ Файл учебника заменён."
+    else:
+        cc.execute("INSERT INTO textbooks(discipline_id,title,kind,file_id,created_at) VALUES(?,?,?,?,?)",(data['did'],data['title'],x[0],x[1],datetime.now(TZ).isoformat()))
+        msg="✅ Учебник добавлен."
+    cc.commit();cc.close();did=data['did'];await state.clear()
+    cc=db(); d=cc.execute("SELECT * FROM disciplines WHERE id=?",(did,)).fetchone(); ts=cc.execute("SELECT * FROM textbooks WHERE discipline_id=? ORDER BY id",(did,)).fetchall(); cc.close()
+    rows=[[b(f"📘 {t['title'][:55]}",f"abook:{t['id']}:{did}")] for t in ts]; rows.append([b("➕ Добавить учебник",f"abooknew:{did}")]); rows.append([b("🔙 Назад","adm:books")])
+    await show(m.bot,m.from_user.id,f"{msg}\n\n{d['emoji']} <b>{d['name']}</b>",ik(rows))
 @router.callback_query(F.data.startswith("abook:"))
 async def abook(c):
-    _,bid,did=c.data.split(':');cc=db();t=cc.execute("SELECT * FROM textbooks WHERE id=?",(bid,)).fetchone();cc.close();await c.answer();await edit_or_answer(c,f"📘 <b>{t['title']}</b>",ik([[b("✏️ Изменить название",f"abookrename:{bid}:{did}")],[b("🗑 Удалить",f"abookdel:{bid}:{did}")],[b("🔙 Назад",f"abooksd:{did}")]]))
+    _,bid,did=c.data.split(':');cc=db();t=cc.execute("SELECT * FROM textbooks WHERE id=?",(bid,)).fetchone();cc.close();await c.answer();await edit_or_answer(c,f"📘 <b>{t['title']}</b>",ik([[b("✏️ Изменить название",f"abookrename:{bid}:{did}")],[b("📎 Поменять файл",f"abookfile:{bid}:{did}")],[b("🗑 Удалить",f"abookdel:{bid}:{did}")],[b("🔙 Назад",f"abooksd:{did}")]]))
+@router.callback_query(F.data.startswith("abookfile:"))
+async def abookfile_start(c:CallbackQuery,state:FSMContext):
+    _,bid,did=c.data.split(':'); await state.update_data(bid=int(bid),did=int(did),change_file=True); await state.set_state(BookCreate.file); await c.answer(); await show(c.bot,c.from_user.id,"📎 Отправьте новый файл учебника:",ik([[b("❌ Отмена",f"abook:{bid}:{did}")]]))
+
 @router.callback_query(F.data.startswith("abookrename:"))
 async def abookrename(c:CallbackQuery,state:FSMContext):
     _,bid,did=c.data.split(':'); await state.update_data(bid=int(bid),did=int(did)); await state.set_state(BookCreate.title); await c.answer(); await show(c.bot,c.from_user.id,"Введите новое название учебника:")
@@ -897,7 +1049,8 @@ async def abookdelok(c):
     _,bid,did=c.data.split(':');cc=db();cc.execute("DELETE FROM textbooks WHERE id=?",(bid,));cc.commit();cc.close();await c.answer("Удалено");await abooksd(c)
 
 # Schedule admin
-async def admin_schedule(c): await c.answer();await edit_or_answer(c,"📅 <b>Управление расписанием</b>\nВыберите месяц:",calendar_kb(2026,9,'asch'))
+async def admin_schedule(c):
+    now=datetime.now(TZ); await c.answer(); await edit_or_answer(c,"📅 <b>Управление расписанием</b>\nВыберите месяц:",calendar_kb(now.year,now.month,'asch'))
 @router.callback_query(F.data.startswith("asch:month:"))
 async def asch_month(c):
     _,_,y,m=c.data.split(':');y=int(y);m=int(m);y,m=max((2026,9),(y,m));y,m=min((2027,7),(y,m));await c.answer();await edit_or_answer(c,f"📅 <b>{m:02d}.{y}</b>\nВыберите дату:",calendar_kb(y,m,'asch'))
@@ -1004,7 +1157,8 @@ async def schc_t(c,state): await state.update_data(typ=c.data.split(':',2)[2]);a
 async def schc_room(m,state):
     data=await state.get_data();idx=data['idx'];less=data.get('lessons',[]);less.append((idx,data['start'],data['end'],data['discipline'],data['typ'],m.text.strip()));
     if idx<data['count']:
-        await state.update_data(lessons=less,idx=idx+1);await state.set_state(ScheduleCreate.lesson_start);await show(m.bot,m.from_user.id,f"Выберите время {idx+1}-й пары:",ik([[b(f"{s}–{e}",f"schc:time:{i}")] for i,(s,e) in enumerate(SLOT_TIMES,1)]));return
+        await state.update_data(lessons=less,idx=idx+1);await state.set_state(ScheduleCreate.lesson_start)
+        await show(m.bot,m.from_user.id,f"Выберите время {idx+1}-й пары или задайте своё:",ik([[b(f"{s}–{e}",f"schc:time:{i}")] for i,(s,e) in enumerate(SLOT_TIMES,1)]+[[b("🕐 Своё время","schc:custom")],[b("❌ Отмена","adm:schedule")]]));return
     cc=db();now=datetime.now(TZ).isoformat();cc.execute("INSERT INTO schedule_days(day,created_at,updated_at) VALUES(?,?,?)",(data['day'],now,now));sid=cc.execute("SELECT last_insert_rowid()").fetchone()[0]
     for x in less: cc.execute("INSERT INTO schedule_lessons(schedule_day_id,lesson_no,start,end,discipline_id,lesson_type,room) VALUES(?,?,?,?,?,?,?)",(sid,*x))
     cc.commit();cc.close();await state.clear()
@@ -1184,10 +1338,14 @@ async def astud(c):
 async def astudadd(c,state):await state.set_state(StudentAdd.name);await c.answer();await show(c.bot,c.from_user.id,"Введите ФИО студента:")
 @router.message(StudentAdd.name)
 async def astudadd_save(m,state):
-    cc=db();
-    try: cc.execute("INSERT INTO students(full_name,normalized_name,created_at) VALUES(?,?,?)",(m.text.strip(),norm(m.text),datetime.now(TZ).isoformat()));cc.commit();await m.answer("✅ Студент добавлен.")
-    except sqlite3.IntegrityError: await m.answer("❌ Такое ФИО уже есть.")
+    cc=db()
+    try:
+        cc.execute("INSERT INTO students(full_name,normalized_name,created_at) VALUES(?,?,?)",(m.text.strip(),norm(m.text),datetime.now(TZ).isoformat()));cc.commit(); msg="✅ Студент добавлен."
+    except sqlite3.IntegrityError: msg="❌ Такое ФИО уже есть."
     cc.close();await state.clear()
+    cc=db(); ss=cc.execute("SELECT * FROM students ORDER BY full_name").fetchall(); cc.close()
+    rows=[[b(f"{s['full_name']} {'🟢' if s['telegram_id'] else '⚪'}",f"astud:{s['id']}")] for s in ss]; rows.append([b("➕ Добавить студента","astudadd")]); rows.append([b("🏠 Админ-панель","adm:back")])
+    await show(m.bot,m.from_user.id,msg+"\n\n👥 <b>Студенты</b>",ik(rows))
 @router.callback_query(F.data.startswith("astuddel:"))
 async def astuddel(c):sid=c.data.split(':')[-1];await c.answer();await edit_or_answer(c,"⚠️ <b>Удалить студента безвозвратно?</b>",ik([[b("🗑 Да, удалить",f"astuddelok:{sid}")],[b("❌ Отмена",f"astud:{sid}")]]))
 @router.callback_query(F.data.startswith("astuddelok:"))
@@ -1209,23 +1367,30 @@ async def adisce(c:CallbackQuery,state:FSMContext):
 async def adisce_name(m:Message,state:FSMContext): await state.update_data(name=m.text.strip()); await state.set_state(DisciplineEdit.emoji); await m.answer("Введите эмодзи дисциплины (например 📐):")
 @router.message(DisciplineEdit.emoji)
 async def adisce_emoji(m:Message,state:FSMContext):
-    data=await state.get_data(); cc=db(); 
+    data=await state.get_data(); cc=db()
     if data.get('did') is None:
         cc.execute("INSERT INTO disciplines(name,emoji,active,textbooks_enabled) VALUES(?,?,1,1)",(data['name'],m.text.strip() or '📚'))
     else:
         cc.execute("UPDATE disciplines SET name=?,emoji=? WHERE id=?",(data['name'],m.text.strip() or '📚',data['did']))
-    cc.commit(); cc.close(); await state.clear(); await m.answer("✅ Дисциплина сохранена.")
+    cc.commit(); cc.close(); await state.clear()
+    cc=db(); ds=cc.execute("SELECT * FROM disciplines WHERE active=1 ORDER BY name").fetchall(); cc.close()
+    rows=[[b(f"{d['emoji']} {d['name']}",f"adisc:{d['id']}")] for d in ds]; rows.append([b("➕ Добавить","adiscadd")]); rows.append([b("🏠 Админ-панель","adm:back")])
+    await show(m.bot,m.from_user.id,"✅ Дисциплина сохранена.\n\n📖 <b>Дисциплины</b>",ik(rows))
 @router.callback_query(F.data=="adiscadd")
 async def adiscadd(c:CallbackQuery,state:FSMContext): await state.set_state(DisciplineEdit.name); await state.update_data(did=None); await c.answer(); await show(c.bot,c.from_user.id,"Введите название новой дисциплины:")
 
 async def admin_disc(c):
-    cc=db();ds=cc.execute("SELECT * FROM disciplines ORDER BY name").fetchall();cc.close();rows=[[b(f"{d['emoji']} {d['name']}",f"adisc:{d['id']}")] for d in ds];rows.append([b("➕ Добавить","adiscadd")]);rows.append([b("🏠 Админ-панель","adm:back")]);await c.answer();await edit_or_answer(c,"📖 <b>Дисциплины</b>",ik(rows))
+    cc=db();ds=cc.execute("SELECT * FROM disciplines WHERE active=1 ORDER BY name").fetchall();cc.close();rows=[[b(f"{d['emoji']} {d['name']}",f"adisc:{d['id']}")] for d in ds];rows.append([b("➕ Добавить","adiscadd")]);rows.append([b("🏠 Админ-панель","adm:back")]);await c.answer();await edit_or_answer(c,"📖 <b>Дисциплины</b>",ik(rows))
 @router.callback_query(F.data.startswith("adisc:"))
 async def adisc(c):did=int(c.data.split(':')[-1]);cc=db();d=cc.execute("SELECT * FROM disciplines WHERE id=?",(did,)).fetchone();cc.close();await c.answer();await edit_or_answer(c,f"{d['emoji']} <b>{d['name']}</b>",ik([[b("✏️ Изменить название/эмодзи",f"adisce:{did}")],[b("🗑 Удалить",f"adiscdel:{did}")],[b("🔙 Назад","adm:disc")]]))
 @router.callback_query(F.data.startswith("adiscdel:"))
 async def adiscdel(c):did=c.data.split(':')[-1];await c.answer();await edit_or_answer(c,"⚠️ <b>Удалить дисциплину?</b>\nСвязанные ДЗ, учебники и расписание также могут быть удалены.",ik([[b("🗑 Да, удалить",f"adiscdelok:{did}")],[b("❌ Отмена",f"adisc:{did}")]]))
 @router.callback_query(F.data.startswith("adiscdelok:"))
-async def adiscdelok(c):did=c.data.split(':')[-1];cc=db();cc.execute("DELETE FROM disciplines WHERE id=?",(did,));cc.commit();cc.close();await c.answer("Удалено");await admin_disc(c)
+async def adiscdelok(c):
+    did=c.data.split(':')[-1]
+    cc=db(); cc.execute("UPDATE disciplines SET active=0 WHERE id=?",(did,)); cc.commit(); cc.close()
+    await c.answer("Дисциплина скрыта из активного списка")
+    await admin_disc(c)
 
 # Broadcast
 async def broadcast_start(c,state):
@@ -1260,21 +1425,36 @@ async def broadcast_send(m,state):
         try: await m.bot.send_message(x['telegram_id'],labels[kind]+"\n\n"+prefix+(m.text or '')); sent+=1
         except Exception: pass
     await m.answer(f"✅ Уведомление отправлено: {sent}")
+    await show(m.bot,m.from_user.id,"🛠 <b>Админ-панель</b>\n\nВыберите действие:",admin_kb())
 
 # Notifications
 async def cleanup_old_data(now):
-    """Удаляет прошедшее расписание и архивирует ДЗ, срок сдачи которого наступил."""
-    today=now.date()
-    cc=db()
-    cc.execute("DELETE FROM schedule_days WHERE day < ?",(today.isoformat(),))
-    cc.execute("""
-        UPDATE homework
-        SET archived=1
-        WHERE hidden=0
-          AND archived=0
-          AND substr(due_date,7,4)||'-'||substr(due_date,4,2)||'-'||substr(due_date,1,2) <= ?
-    """,(today.isoformat(),))
-    cc.commit(); cc.close()
+    """Удаляет прошедшее расписание и архивирует просроченные ДЗ.
+    Не мешает обычным обработчикам при кратковременной блокировке SQLite.
+    """
+    today=now.date().isoformat()
+    for attempt in range(3):
+        cc=None
+        try:
+            cc=db()
+            cc.execute("DELETE FROM schedule_days WHERE day < ?",(today,))
+            cc.execute("""
+                UPDATE homework
+                SET archived=1
+                WHERE hidden=0
+                  AND archived=0
+                  AND substr(due_date,7,4)||'-'||substr(due_date,4,2)||substr(due_date,1,2) <= ?
+            """,(today,))
+            cc.commit(); cc.close()
+            return
+        except sqlite3.OperationalError as e:
+            if cc:
+                try: cc.rollback(); cc.close()
+                except Exception: pass
+            if "locked" not in str(e).lower() or attempt == 2:
+                log.warning("cleanup_old_data skipped: %s", e)
+                return
+            await asyncio.sleep(0.5 * (attempt + 1))
 
 
 async def notification_job(bot):
