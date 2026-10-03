@@ -64,11 +64,15 @@ def migrate():
     
     """)
     notif_cols = {r[1] for r in cur.execute("PRAGMA table_info(notification_settings)").fetchall()}
-    for col in ("updates", "other", "deadline_reminders"):
+    for col in ("updates", "other", "deadline_reminders", "new_homework", "setup_done"):
         if col not in notif_cols:
             cur.execute(f"ALTER TABLE notification_settings ADD COLUMN {col} INTEGER NOT NULL DEFAULT 1")
     if "next_lesson_minutes" not in notif_cols:
         cur.execute("ALTER TABLE notification_settings ADD COLUMN next_lesson_minutes INTEGER NOT NULL DEFAULT 30")
+    hcols = {r[1] for r in cur.execute("PRAGMA table_info(homework)").fetchall()}
+    if "client_token" not in hcols:
+        cur.execute("ALTER TABLE homework ADD COLUMN client_token TEXT")
+    cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_homework_client_token ON homework(client_token) WHERE client_token IS NOT NULL")
     cur.execute("INSERT OR IGNORE INTO notification_settings(telegram_id) SELECT telegram_id FROM students WHERE telegram_id IS NOT NULL")
     cur.execute("INSERT OR IGNORE INTO homework_views(telegram_id,homework_id,viewed_at) SELECT s.telegram_id,h.id,? FROM students s CROSS JOIN homework h WHERE s.telegram_id IS NOT NULL", (datetime.now(TZ).isoformat(),))
 
@@ -217,7 +221,9 @@ async def cancel_command(m:Message,state:FSMContext):
 @router.message(Command("start"))
 async def start(m:Message,state:FSMContext):
     await state.clear()
-    if is_auth(m.from_user.id): return await main_menu(m.bot,m.from_user.id)
+    if is_auth(m.from_user.id):
+        if await initial_settings_prompt(m.bot,m.from_user.id): return
+        return await main_menu(m.bot,m.from_user.id)
     await m.answer("👋 Привет! Для доступа к боту введи своё ФИО, как в списке студентов.")
     await state.set_state(Auth.name)
 
@@ -228,7 +234,9 @@ async def auth_name(m:Message,state:FSMContext):
         c.close(); return await m.answer("❌ Такого ФИО нет в списке. Проверь написание и попробуй ещё раз.")
     if r["telegram_id"] not in (None,m.from_user.id):
         c.close(); return await m.answer("❌ Это ФИО уже привязано к другому Telegram ID.")
-    c.execute("UPDATE students SET telegram_id=? WHERE id=?",(m.from_user.id,r["id"])); c.execute("INSERT OR IGNORE INTO notification_settings(telegram_id) VALUES(?)",(m.from_user.id,)); c.execute("INSERT OR IGNORE INTO homework_views(telegram_id,homework_id,viewed_at) SELECT ?,id,? FROM homework",(m.from_user.id,datetime.now(TZ).isoformat())); c.commit(); c.close(); await state.clear(); await main_menu(m.bot,m.from_user.id,r["full_name"])
+    c.execute("UPDATE students SET telegram_id=? WHERE id=?",(m.from_user.id,r["id"])); c.execute("INSERT OR IGNORE INTO notification_settings(telegram_id) VALUES(?)",(m.from_user.id,)); c.execute("INSERT OR IGNORE INTO homework_views(telegram_id,homework_id,viewed_at) SELECT ?,id,? FROM homework",(m.from_user.id,datetime.now(TZ).isoformat())); c.commit(); c.close(); await state.clear();
+    if await initial_settings_prompt(m.bot,m.from_user.id): return
+    await main_menu(m.bot,m.from_user.id,r["full_name"])
 
 @router.message(Command("info"))
 async def info(m:Message):
@@ -495,6 +503,17 @@ async def book_back(c:CallbackQuery):
     await c.answer(); await show(c.bot,c.from_user.id,f"{d['emoji']} <b>{d['name']}</b>",ik(rows))
 
 # Settings
+async def initial_settings_prompt(bot, uid):
+    cc=db(); cc.execute("INSERT OR IGNORE INTO notification_settings(telegram_id) VALUES(?)", (uid,)); cc.commit(); r=cc.execute("SELECT setup_done FROM notification_settings WHERE telegram_id=?", (uid,)).fetchone(); cc.close()
+    if not r or r["setup_done"]:
+        return False
+    await show(bot,uid,"⚙️ <b>Первоначальная настройка</b>\n\nВыберите, какие уведомления получать. Всё можно изменить позже в разделе «Настройки».",ik([[b("🔔 Настроить уведомления","settings:notif:setup")],[b("Пропустить","settings:setup_skip")]]))
+    return True
+
+@router.callback_query(F.data=="settings:setup_skip")
+async def settings_setup_skip(c:CallbackQuery):
+    cc=db(); cc.execute("INSERT OR IGNORE INTO notification_settings(telegram_id) VALUES(?)",(c.from_user.id,)); cc.execute("UPDATE notification_settings SET setup_done=1 WHERE telegram_id=?",(c.from_user.id,)); cc.commit(); cc.close(); await c.answer(); await main_menu(c.bot,c.from_user.id)
+
 @router.callback_query(F.data=="menu:settings")
 async def settings(c:CallbackQuery):
     cc=db(); s=cc.execute("SELECT * FROM notification_settings WHERE telegram_id=?",(c.from_user.id,)).fetchone(); cc.close()
@@ -503,18 +522,20 @@ async def settings(c:CallbackQuery):
         cc=db(); s=cc.execute("SELECT * FROM notification_settings WHERE telegram_id=?",(c.from_user.id,)).fetchone(); cc.close()
     await c.answer(); await edit_or_answer(c,"⚙️ <b>Настройки</b>\n\nВыберите раздел:",ik([[b("🔔 Уведомления","settings:notif")],[b("🏠 Назад","menu:home")]]))
 
-@router.callback_query(F.data=="settings:notif")
+@router.callback_query(F.data.in_({"settings:notif","settings:notif:setup"}))
 async def notification_settings_menu(c:CallbackQuery):
     cc=db(); s=cc.execute("SELECT * FROM notification_settings WHERE telegram_id=?",(c.from_user.id,)).fetchone(); cc.close()
+    setup_mode = c.data == "settings:notif:setup" or not s["setup_done"]
     await c.answer(); await edit_or_answer(c,
-        "🔔 <b>Уведомления</b>\n\n"
+        ("⚙️ <b>Первоначальная настройка уведомлений</b>\n\n" if setup_mode else "🔔 <b>Уведомления</b>\n\n") +
         f"🔔 Следующая пара: {'✅' if s['next_lesson'] else '❌'}\n"
         f"⏱ Напоминать за: <b>{s['next_lesson_minutes']} мин.</b>\n"
         f"📅 Расписание на завтра: {'✅' if s['tomorrow_schedule'] else '❌'}\n"
         f"🔄 Обновления: {'✅' if s['updates'] else '❌'}\n"
         f"📢 Прочие уведомления: {'✅' if s['other'] else '❌'}\n"
-        f"⏰ Напоминания о дедлайнах: {'✅' if s['deadline_reminders'] else '❌'}\n\n"
-        "⚠️ Важные уведомления и уведомления о новом ДЗ отключить нельзя.",
+        f"⏰ Напоминания о дедлайнах: {'✅' if s['deadline_reminders'] else '❌'}\n"
+        f"📝 Новое ДЗ: {'✅' if s['new_homework'] else '❌'}\n\n"
+        "🚨 Важные системные сообщения нельзя отключить.",
         ik([
             [b("🔔 Вкл./выкл. следующую пару","set:next_toggle")],
             [b("⏱ За сколько напоминать","set:next_time")],
@@ -522,9 +543,14 @@ async def notification_settings_menu(c:CallbackQuery):
             [b("🔄 Обновления","set:updates")],
             [b("📢 Прочие уведомления","set:other")],
             [b("⏰ Напоминания о дедлайнах","set:deadline")],
-            [b("🔙 Назад","menu:settings")]
+            [b("📝 Новое ДЗ","set:new_homework")],
+            ([b("✅ Готово","settings:setup_done")] if setup_mode else [b("🔙 Назад","menu:settings")])
         ]))
 
+
+@router.callback_query(F.data=="settings:setup_done")
+async def settings_setup_done(c:CallbackQuery):
+    cc=db(); cc.execute("INSERT OR IGNORE INTO notification_settings(telegram_id) VALUES(?)",(c.from_user.id,)); cc.execute("UPDATE notification_settings SET setup_done=1 WHERE telegram_id=?",(c.from_user.id,)); cc.commit(); cc.close(); await c.answer("Настройки сохранены"); await main_menu(c.bot,c.from_user.id)
 
 @router.callback_query(F.data=="set:next_time")
 async def next_time_menu(c:CallbackQuery):
@@ -551,9 +577,9 @@ async def set_next_time(c:CallbackQuery):
     await notification_settings_menu(c)
 
 
-@router.callback_query(F.data.in_({"set:tomorrow","set:next_toggle","set:updates","set:other","set:deadline"}))
+@router.callback_query(F.data.in_({"set:tomorrow","set:next_toggle","set:updates","set:other","set:deadline","set:new_homework"}))
 async def toggle(c:CallbackQuery):
-    col={"set:tomorrow":"tomorrow_schedule","set:next_toggle":"next_lesson","set:updates":"updates","set:other":"other","set:deadline":"deadline_reminders"}[c.data]
+    col={"set:tomorrow":"tomorrow_schedule","set:next_toggle":"next_lesson","set:updates":"updates","set:other":"other","set:deadline":"deadline_reminders","set:new_homework":"new_homework"}[c.data]
     cc=db(); cc.execute("INSERT OR IGNORE INTO notification_settings(telegram_id) VALUES(?)",(c.from_user.id,)); cc.execute(f"UPDATE notification_settings SET {col}=1-{col} WHERE telegram_id=?",(c.from_user.id,)); cc.commit(); cc.close(); await notification_settings_menu(c)
 
 
@@ -688,7 +714,7 @@ async def newhw_publish(c,state):
     cc.commit();cc.close();await state.clear();await c.answer("Опубликовано!");await show(c.bot,c.from_user.id,"✅ ДЗ опубликовано.\n\n📢 Авторизованные пользователи получат уведомление «📝 Новое ДЗ».",admin_kb());await broadcast_new_hw(c.bot,hid)
 
 async def broadcast_new_hw(bot,hid):
-    cc=db(); h=cc.execute("SELECT h.*,d.name discipline,d.emoji FROM homework h JOIN disciplines d ON d.id=h.discipline_id WHERE h.id=?",(hid,)).fetchone(); ex=cc.execute("SELECT title FROM homework_extra WHERE homework_id=?",(hid,)).fetchone(); users=cc.execute("SELECT telegram_id FROM students WHERE telegram_id IS NOT NULL").fetchall(); cc.close()
+    cc=db(); h=cc.execute("SELECT h.*,d.name discipline,d.emoji FROM homework h JOIN disciplines d ON d.id=h.discipline_id WHERE h.id=?",(hid,)).fetchone(); ex=cc.execute("SELECT title FROM homework_extra WHERE homework_id=?",(hid,)).fetchone(); users=cc.execute("SELECT s.telegram_id FROM students s JOIN notification_settings n ON n.telegram_id=s.telegram_id WHERE n.new_homework=1").fetchall(); cc.close()
     if not h: return
     title=ex['title'] if ex else 'Задание'
     text=f"📝 <b>Новое ДЗ</b>\n\n{h['emoji']} <b>{h['discipline']}</b>\n<b>{title}</b>\n\n{h['text']}\n\n📅 <b>Сдать до:</b> {h['due_date']}\n📤 <b>Опубликовано:</b> {h['published_date']}"

@@ -119,12 +119,22 @@ def migrate_web_tables():
         CREATE TABLE IF NOT EXISTS app_migrations (id TEXT PRIMARY KEY, applied_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS google_sync_state (id INTEGER PRIMARY KEY CHECK(id=1), last_sync_at TEXT, last_status TEXT, last_error TEXT, updated_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS homework_upload_requests (telegram_id INTEGER PRIMARY KEY, homework_id INTEGER NOT NULL, created_at TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'waiting', FOREIGN KEY(homework_id) REFERENCES homework(id) ON DELETE CASCADE);
+        CREATE TABLE IF NOT EXISTS notification_settings (telegram_id INTEGER PRIMARY KEY, tomorrow_schedule INTEGER NOT NULL DEFAULT 1, next_lesson INTEGER NOT NULL DEFAULT 1, updates INTEGER NOT NULL DEFAULT 1, other INTEGER NOT NULL DEFAULT 1, deadline_reminders INTEGER NOT NULL DEFAULT 1, next_lesson_minutes INTEGER NOT NULL DEFAULT 30, new_homework INTEGER NOT NULL DEFAULT 1, setup_done INTEGER NOT NULL DEFAULT 0, FOREIGN KEY(telegram_id) REFERENCES students(telegram_id) ON DELETE CASCADE);
         """
     )
     # Journal columns are independent occurrences, so the same calendar date
     # may appear more than once. Migrate older schemas without deleting data.
     def cols(table):
         return {row[1] for row in c.execute(f"PRAGMA table_info({table})").fetchall()}
+    hcols=cols('homework')
+    if 'client_token' not in hcols:
+        c.execute('ALTER TABLE homework ADD COLUMN client_token TEXT')
+    c.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_homework_client_token ON homework(client_token) WHERE client_token IS NOT NULL')
+    ncols=cols('notification_settings')
+    for col,ddl in [('updates','INTEGER NOT NULL DEFAULT 1'),('other','INTEGER NOT NULL DEFAULT 1'),('deadline_reminders','INTEGER NOT NULL DEFAULT 1'),('next_lesson_minutes','INTEGER NOT NULL DEFAULT 30'),('new_homework','INTEGER NOT NULL DEFAULT 1'),('setup_done','INTEGER NOT NULL DEFAULT 0')]:
+        if col not in ncols:
+            c.execute(f'ALTER TABLE notification_settings ADD COLUMN {col} {ddl}')
+    c.execute('INSERT OR IGNORE INTO notification_settings(telegram_id) SELECT telegram_id FROM students WHERE telegram_id IS NOT NULL')
 
     gd_sql = c.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='grade_dates'").fetchone()
     if gd_sql and 'UNIQUE(discipline_id,grade_date)' in (gd_sql[0] or '').replace(' ', ''):
@@ -205,6 +215,7 @@ class HomeworkCreateIn(BaseModel):
     explanation: str = Field(default="", max_length=5000)
     due_date: str
     wants_file: bool = False
+    client_token: str | None = Field(default=None, max_length=80)
 
 
 class LessonIn(BaseModel):
@@ -334,6 +345,11 @@ def me(x_telegram_init_data: str | None = Header(default=None)):
     student = c.execute("SELECT * FROM students WHERE telegram_id=?", (uid,)).fetchone()
     is_admin = uid in ADMIN_IDS or bool(c.execute("SELECT 1 FROM admin_users WHERE telegram_id=?", (uid,)).fetchone())
     stats = student_stats(c, student["id"]) if student else {"average": None, "grade_count": 0, "n_count": 0, "b_count": 0, "o_count": 0}
+    ns = c.execute("SELECT * FROM notification_settings WHERE telegram_id=?", (uid,)).fetchone() if student else None
+    if student and not ns:
+        c.execute("INSERT OR IGNORE INTO notification_settings(telegram_id) VALUES(?)", (uid,))
+        c.commit()
+        ns = c.execute("SELECT * FROM notification_settings WHERE telegram_id=?", (uid,)).fetchone()
     c.close()
     if not student and not is_admin:
         raise HTTPException(403, "Ваш Telegram аккаунт ещё не привязан к студенту.")
@@ -343,6 +359,7 @@ def me(x_telegram_init_data: str | None = Header(default=None)):
         "student_id": student["id"] if student else None,
         "is_admin": is_admin,
         "stats": stats,
+        "needs_setup": bool(ns and not ns["setup_done"]) if student else False,
         "telegram": {"first_name": tg_user.get("first_name", ""), "username": tg_user.get("username", "")},
     }
 
@@ -386,6 +403,34 @@ def next_lesson(x_telegram_init_data: str | None = Header(default=None)):
     c = db(); row = next_lesson_row(c); c.close()
     return {"lesson": row}
 
+
+@app.get("/api/settings")
+def get_settings(x_telegram_init_data: str | None = Header(default=None)):
+    uid, student, _, _ = current_user(x_telegram_init_data)
+    c=db(); c.execute("INSERT OR IGNORE INTO notification_settings(telegram_id) VALUES(?)", (uid,)); c.commit()
+    r=c.execute("SELECT tomorrow_schedule,next_lesson,updates,other,deadline_reminders,next_lesson_minutes,new_homework,setup_done FROM notification_settings WHERE telegram_id=?", (uid,)).fetchone(); c.close()
+    return dict(r)
+
+class SettingsIn(BaseModel):
+    tomorrow_schedule: bool = True
+    next_lesson: bool = True
+    updates: bool = True
+    other: bool = True
+    deadline_reminders: bool = True
+    next_lesson_minutes: int = Field(default=30, ge=5, le=90)
+    new_homework: bool = True
+    setup_done: bool = False
+
+@app.patch("/api/settings")
+def update_settings(payload: SettingsIn, x_telegram_init_data: str | None = Header(default=None)):
+    uid, student, _, _ = current_user(x_telegram_init_data)
+    allowed={5,10,15,30,45,60,90}
+    if payload.next_lesson_minutes not in allowed:
+        raise HTTPException(400, "Недопустимое время напоминания.")
+    c=db(); c.execute("""INSERT INTO notification_settings(telegram_id,tomorrow_schedule,next_lesson,updates,other,deadline_reminders,next_lesson_minutes,new_homework,setup_done)
+        VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(telegram_id) DO UPDATE SET tomorrow_schedule=excluded.tomorrow_schedule,next_lesson=excluded.next_lesson,updates=excluded.updates,other=excluded.other,deadline_reminders=excluded.deadline_reminders,next_lesson_minutes=excluded.next_lesson_minutes,new_homework=excluded.new_homework,setup_done=excluded.setup_done""",
+        (uid,int(payload.tomorrow_schedule),int(payload.next_lesson),int(payload.updates),int(payload.other),int(payload.deadline_reminders),payload.next_lesson_minutes,int(payload.new_homework),int(payload.setup_done)))
+    c.commit(); c.close(); return {"ok":True}
 
 @app.get("/api/home")
 def home(x_telegram_init_data: str | None = Header(default=None)):
@@ -647,7 +692,21 @@ async def create_homework(payload: HomeworkCreateIn, x_telegram_init_data: str |
     if not d:
         c.close(); raise HTTPException(404,"Дисциплина не найдена.")
     now=datetime.now(TIMEZONE).date().strftime("%d.%m.%Y")
-    cur=c.execute("INSERT INTO homework(discipline_id,text,explanation,published_date,due_date) VALUES(?,?,?,?,?)",(payload.discipline_id,payload.text,payload.explanation,now,due))
+    token=(payload.client_token or "").strip() or None
+    if token:
+        existing=c.execute("SELECT id FROM homework WHERE client_token=?", (token,)).fetchone()
+        if existing:
+            hid=existing["id"]
+            c.close()
+            return {"ok":True,"homework_id":hid,"waiting_for_file":payload.wants_file,"duplicate":True}
+    try:
+        cur=c.execute("INSERT INTO homework(discipline_id,text,explanation,published_date,due_date,client_token) VALUES(?,?,?,?,?,?)",(payload.discipline_id,payload.text,payload.explanation,now,due,token))
+    except sqlite3.IntegrityError:
+        if token:
+            existing=c.execute("SELECT id FROM homework WHERE client_token=?", (token,)).fetchone()
+            if existing:
+                hid=existing["id"]; c.close(); return {"ok":True,"homework_id":hid,"waiting_for_file":payload.wants_file,"duplicate":True}
+        c.close(); raise
     hid=cur.lastrowid
     c.execute("INSERT INTO homework_extra(homework_id,title) VALUES(?,?)",(hid,payload.title.strip()))
     if payload.wants_file:
