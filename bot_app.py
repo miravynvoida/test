@@ -157,7 +157,7 @@ def main_kb(uid=None):
         [b("📚 Учебники","menu:books"), b("⚙️ Настройки","menu:settings")],
     ]
     if MINI_APP_URL:
-        rows.append([InlineKeyboardButton(text="📖 Электронный дневник", web_app=WebAppInfo(url=MINI_APP_URL))])
+        rows.append([InlineKeyboardButton(text="📖 Электронный дневник", web_app=WebAppInfo(url=MINI_APP_URL + (("&" if "?" in MINI_APP_URL else "?") + "admin=1") if uid is not None and is_admin(uid) else MINI_APP_URL))])
     else:
         rows.append([b("👤 Личный кабинет","menu:soon")])
     if uid is not None and is_admin(uid):
@@ -1457,6 +1457,32 @@ async def broadcast_send(m,state):
         except Exception: pass
     await m.answer(f"✅ Уведомление отправлено: {sent}")
     await show(m.bot,m.from_user.id,"🛠 <b>Админ-панель</b>\n\nВыберите действие:",admin_kb())
+
+# Mini App -> Telegram file bridge for admin textbooks/materials.
+@router.message()
+async def admin_file_request_bridge(m: Message):
+    if not is_admin(m.from_user.id):
+        return
+    x = media_info(m)
+    if not x:
+        return
+    cc = db()
+    req = cc.execute("SELECT target_type,target_id FROM admin_file_requests WHERE telegram_id=?", (m.from_user.id,)).fetchone()
+    if not req:
+        cc.close()
+        return
+    if req['target_type'] == 'textbook':
+        cc.execute("UPDATE textbooks SET kind=?,file_id=?,caption=? WHERE id=?", (x[0],x[1],x[2],req['target_id']))
+        msg = '✅ Файл учебника прикреплён.'
+    elif req['target_type'] == 'material':
+        cc.execute("UPDATE additional_materials SET kind=?,file_id=?,caption=? WHERE id=?", (x[0],x[1],x[2],req['target_id']))
+        msg = '✅ Файл дополнительного материала прикреплён.'
+    else:
+        cc.close()
+        return
+    cc.execute("DELETE FROM admin_file_requests WHERE telegram_id=?", (m.from_user.id,))
+    cc.commit(); cc.close()
+    await m.answer(msg)
 
 # Notifications
 async def cleanup_old_data(now):

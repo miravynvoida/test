@@ -10,3 +10,6 @@
 
 .bottom-nav.admin-mode{grid-template-columns:repeat(6,1fr)}
 .bottom-nav button[hidden]{display:none}
+.admin-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+.admin-grid button{min-height:52px;text-align:left}
+@media(max-width:420px){.admin-grid{grid-template-columns:1fr}}

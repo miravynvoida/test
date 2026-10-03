@@ -3,6 +3,7 @@ import hmac
 import json
 import os
 import sqlite3
+import unicodedata
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 from pathlib import Path
@@ -120,6 +121,12 @@ def migrate_web_tables():
         CREATE TABLE IF NOT EXISTS google_sync_state (id INTEGER PRIMARY KEY CHECK(id=1), last_sync_at TEXT, last_status TEXT, last_error TEXT, updated_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS homework_upload_requests (telegram_id INTEGER PRIMARY KEY, homework_id INTEGER NOT NULL, created_at TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'waiting', FOREIGN KEY(homework_id) REFERENCES homework(id) ON DELETE CASCADE);
         CREATE TABLE IF NOT EXISTS notification_settings (telegram_id INTEGER PRIMARY KEY, tomorrow_schedule INTEGER NOT NULL DEFAULT 1, next_lesson INTEGER NOT NULL DEFAULT 1, updates INTEGER NOT NULL DEFAULT 1, other INTEGER NOT NULL DEFAULT 1, deadline_reminders INTEGER NOT NULL DEFAULT 1, next_lesson_minutes INTEGER NOT NULL DEFAULT 30, new_homework INTEGER NOT NULL DEFAULT 1, setup_done INTEGER NOT NULL DEFAULT 0, FOREIGN KEY(telegram_id) REFERENCES students(telegram_id) ON DELETE CASCADE);
+        CREATE TABLE IF NOT EXISTS admin_file_requests (
+            telegram_id INTEGER PRIMARY KEY,
+            target_type TEXT NOT NULL,
+            target_id INTEGER NOT NULL,
+            created_at TEXT NOT NULL
+        );
         """
     )
     # Journal columns are independent occurrences, so the same calendar date
@@ -748,6 +755,190 @@ async def send_textbook(textbook_id: int, x_telegram_init_data: str | None = Hea
     if r.status_code>=400 or not r.json().get("ok"): raise HTTPException(502,"Telegram не смог отправить учебник.")
     return {"ok":True}
 
+
+
+def admin_auth(x_telegram_init_data: str | None):
+    return current_user(x_telegram_init_data, admin=True)
+
+def _norm_name(value: str) -> str:
+    value = unicodedata.normalize("NFKC", value or "").strip().lower().replace("ё", "е")
+    return " ".join(value.split())
+
+@app.get("/api/admin/homework")
+def admin_homework_api(x_telegram_init_data: str | None = Header(default=None)):
+    admin_auth(x_telegram_init_data); c=db()
+    rows=c.execute("""SELECT h.*,d.name discipline,d.emoji,COALESCE(e.title,substr(h.text,1,80)) title FROM homework h JOIN disciplines d ON d.id=h.discipline_id LEFT JOIN homework_extra e ON e.homework_id=h.id ORDER BY h.archived,h.due_date DESC,h.id DESC""").fetchall(); c.close(); return {"items":[dict(x) for x in rows]}
+
+@app.delete("/api/admin/homework/{homework_id}")
+def admin_homework_delete(homework_id:int,x_telegram_init_data:str|None=Header(default=None)):
+    admin_auth(x_telegram_init_data); c=db(); c.execute("DELETE FROM homework WHERE id=?",(homework_id,)); c.commit(); c.close(); return {"ok":True}
+
+@app.post("/api/admin/homework/{homework_id}/archive")
+def admin_homework_archive(homework_id:int,x_telegram_init_data:str|None=Header(default=None)):
+    admin_auth(x_telegram_init_data); c=db(); c.execute("UPDATE homework SET archived=1 WHERE id=?",(homework_id,)); c.commit(); c.close(); return {"ok":True}
+
+@app.get("/api/admin/textbooks")
+def admin_textbooks(x_telegram_init_data: str | None = Header(default=None)):
+    admin_auth(x_telegram_init_data); c=db()
+    rows=c.execute("""SELECT t.*,d.name discipline,d.emoji FROM textbooks t JOIN disciplines d ON d.id=t.discipline_id WHERE d.active=1 ORDER BY d.name,t.title""").fetchall(); c.close()
+    return {"items":[dict(x) for x in rows]}
+
+class AdminTextbookIn(BaseModel):
+    discipline_id:int
+    title:str
+    file_id:str|None=None
+    kind:str|None=None
+    caption:str|None=None
+
+@app.post("/api/admin/textbooks")
+def admin_textbook_create(payload:AdminTextbookIn,x_telegram_init_data:str|None=Header(default=None)):
+    uid,_,_,_=admin_auth(x_telegram_init_data); title=payload.title.strip()
+    if not title: raise HTTPException(400,"Название учебника не может быть пустым.")
+    c=db(); d=c.execute("SELECT id FROM disciplines WHERE id=? AND active=1",(payload.discipline_id,)).fetchone()
+    if not d: c.close(); raise HTTPException(404,"Дисциплина не найдена.")
+    c.execute("INSERT INTO textbooks(discipline_id,title,kind,file_id,caption,created_at) VALUES(?,?,?,?,?,?)",(payload.discipline_id,title,payload.kind,payload.file_id,payload.caption,now_iso())); tid=c.lastrowid; c.commit(); c.close()
+    return {"ok":True,"id":tid,"needs_file":not bool(payload.file_id)}
+
+@app.patch("/api/admin/textbooks/{textbook_id}")
+def admin_textbook_update(textbook_id:int,payload:AdminTextbookIn,x_telegram_init_data:str|None=Header(default=None)):
+    admin_auth(x_telegram_init_data); title=payload.title.strip()
+    if not title: raise HTTPException(400,"Название учебника не может быть пустым.")
+    c=db(); r=c.execute("SELECT id FROM textbooks WHERE id=?",(textbook_id,)).fetchone()
+    if not r: c.close(); raise HTTPException(404,"Учебник не найден.")
+    if payload.file_id:
+        c.execute("UPDATE textbooks SET discipline_id=?,title=?,kind=?,file_id=?,caption=? WHERE id=?",(payload.discipline_id,title,payload.kind,payload.file_id,payload.caption,textbook_id))
+    else:
+        c.execute("UPDATE textbooks SET discipline_id=?,title=? WHERE id=?",(payload.discipline_id,title,textbook_id))
+    c.commit(); c.close(); return {"ok":True}
+
+@app.delete("/api/admin/textbooks/{textbook_id}")
+def admin_textbook_delete(textbook_id:int,x_telegram_init_data:str|None=Header(default=None)):
+    admin_auth(x_telegram_init_data); c=db(); c.execute("DELETE FROM textbooks WHERE id=?",(textbook_id,)); c.commit(); c.close(); return {"ok":True}
+
+@app.post("/api/admin/textbooks/{textbook_id}/request-file")
+def admin_textbook_request_file(textbook_id:int,x_telegram_init_data:str|None=Header(default=None)):
+    uid,_,_,_=admin_auth(x_telegram_init_data); c=db(); t=c.execute("SELECT title FROM textbooks WHERE id=?",(textbook_id,)).fetchone()
+    if not t: c.close(); raise HTTPException(404,"Учебник не найден.")
+    c.execute("INSERT OR REPLACE INTO admin_file_requests(telegram_id,target_type,target_id,created_at) VALUES(?,?,?,?)",(uid,'textbook',textbook_id,now_iso())); c.commit(); c.close()
+    async def send():
+        async with httpx.AsyncClient(timeout=20) as client:
+            await client.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage",data={"chat_id":uid,"text":f"📎 Отправьте следующим сообщением файл учебника «{t['title']}». Он будет прикреплён автоматически."})
+    import asyncio; asyncio.create_task(send())
+    return {"ok":True}
+
+@app.get("/api/admin/materials")
+def admin_materials_api(x_telegram_init_data:str|None=Header(default=None)):
+    admin_auth(x_telegram_init_data); c=db(); rows=c.execute("""SELECT m.*,d.name discipline,d.emoji FROM additional_materials m JOIN disciplines d ON d.id=m.discipline_id WHERE d.active=1 ORDER BY d.name,m.id DESC""").fetchall(); c.close(); return {"items":[dict(x) for x in rows]}
+
+class AdminMaterialIn(BaseModel):
+    discipline_id:int
+    title:str
+    file_id:str|None=None
+    kind:str|None=None
+    caption:str|None=None
+
+@app.post("/api/admin/materials")
+def admin_material_create(payload:AdminMaterialIn,x_telegram_init_data:str|None=Header(default=None)):
+    uid,_,_,_=admin_auth(x_telegram_init_data); title=payload.title.strip()
+    if not title: raise HTTPException(400,"Название материала не может быть пустым.")
+    c=db(); d=c.execute("SELECT id FROM disciplines WHERE id=? AND active=1",(payload.discipline_id,)).fetchone()
+    if not d: c.close(); raise HTTPException(404,"Дисциплина не найдена.")
+    c.execute("INSERT INTO additional_materials(discipline_id,title,kind,file_id,caption,created_at) VALUES(?,?,?,?,?,?)",(payload.discipline_id,title,payload.kind,payload.file_id,payload.caption,now_iso())); mid=c.lastrowid; c.commit(); c.close(); return {"ok":True,"id":mid,"needs_file":not bool(payload.file_id)}
+
+@app.patch("/api/admin/materials/{material_id}")
+def admin_material_update(material_id:int,payload:AdminMaterialIn,x_telegram_init_data:str|None=Header(default=None)):
+    admin_auth(x_telegram_init_data); title=payload.title.strip()
+    if not title: raise HTTPException(400,"Название материала не может быть пустым.")
+    c=db(); r=c.execute("SELECT id FROM additional_materials WHERE id=?",(material_id,)).fetchone()
+    if not r: c.close(); raise HTTPException(404,"Материал не найден.")
+    if payload.file_id: c.execute("UPDATE additional_materials SET discipline_id=?,title=?,kind=?,file_id=?,caption=? WHERE id=?",(payload.discipline_id,title,payload.kind,payload.file_id,payload.caption,material_id))
+    else: c.execute("UPDATE additional_materials SET discipline_id=?,title=? WHERE id=?",(payload.discipline_id,title,material_id))
+    c.commit(); c.close(); return {"ok":True}
+
+@app.delete("/api/admin/materials/{material_id}")
+def admin_material_delete(material_id:int,x_telegram_init_data:str|None=Header(default=None)):
+    admin_auth(x_telegram_init_data); c=db(); c.execute("DELETE FROM additional_materials WHERE id=?",(material_id,)); c.commit(); c.close(); return {"ok":True}
+
+@app.post("/api/admin/materials/{material_id}/request-file")
+def admin_material_request_file(material_id:int,x_telegram_init_data:str|None=Header(default=None)):
+    uid,_,_,_=admin_auth(x_telegram_init_data); c=db(); m=c.execute("SELECT title FROM additional_materials WHERE id=?",(material_id,)).fetchone()
+    if not m: c.close(); raise HTTPException(404,"Материал не найден.")
+    c.execute("INSERT OR REPLACE INTO admin_file_requests(telegram_id,target_type,target_id,created_at) VALUES(?,?,?,?)",(uid,'material',material_id,now_iso())); c.commit(); c.close()
+    async def send():
+        async with httpx.AsyncClient(timeout=20) as client: await client.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage",data={"chat_id":uid,"text":f"📎 Отправьте следующим сообщением файл материала «{m['title']}». Он будет прикреплён автоматически."})
+    import asyncio; asyncio.create_task(send()); return {"ok":True}
+
+@app.get("/api/admin/students")
+def admin_students_api(x_telegram_init_data:str|None=Header(default=None)):
+    admin_auth(x_telegram_init_data); c=db(); rows=c.execute("SELECT id,full_name,telegram_id,created_at FROM students ORDER BY full_name").fetchall(); c.close(); return {"items":[dict(x) for x in rows]}
+
+class StudentCreateIn(BaseModel):
+    full_name:str
+
+@app.post("/api/admin/students")
+def admin_student_create(payload:StudentCreateIn,x_telegram_init_data:str|None=Header(default=None)):
+    admin_auth(x_telegram_init_data); name=payload.full_name.strip()
+    if not name: raise HTTPException(400,"ФИО не может быть пустым.")
+    c=db()
+    try: c.execute("INSERT INTO students(full_name,normalized_name,created_at) VALUES(?,?,?)",(name,_norm_name(name),now_iso())); sid=c.lastrowid; c.commit()
+    except sqlite3.IntegrityError: c.close(); raise HTTPException(400,"Такое ФИО уже есть.")
+    c.close(); return {"ok":True,"id":sid}
+
+@app.delete("/api/admin/students/{student_id}")
+def admin_student_delete(student_id:int,x_telegram_init_data:str|None=Header(default=None)):
+    admin_auth(x_telegram_init_data); c=db(); c.execute("DELETE FROM students WHERE id=?",(student_id,)); c.commit(); c.close(); return {"ok":True}
+
+@app.get("/api/admin/vip")
+def admin_vip_api(x_telegram_init_data:str|None=Header(default=None)):
+    admin_auth(x_telegram_init_data); c=db(); rows=c.execute("""SELECT s.id,s.full_name,s.telegram_id,CASE WHEN v.telegram_id IS NULL THEN 0 ELSE 1 END is_vip FROM students s LEFT JOIN vip_users v ON v.telegram_id=s.telegram_id WHERE s.telegram_id IS NOT NULL ORDER BY s.full_name""").fetchall(); c.close(); return {"items":[dict(x) for x in rows]}
+
+@app.post("/api/admin/vip/{telegram_id}/toggle")
+def admin_vip_toggle(telegram_id:int,x_telegram_init_data:str|None=Header(default=None)):
+    admin_auth(x_telegram_init_data); c=db(); s=c.execute("SELECT full_name FROM students WHERE telegram_id=?",(telegram_id,)).fetchone()
+    if not s: c.close(); raise HTTPException(404,"Студент не найден.")
+    v=c.execute("SELECT 1 FROM vip_users WHERE telegram_id=?",(telegram_id,)).fetchone()
+    if v: c.execute("DELETE FROM vip_users WHERE telegram_id=?",(telegram_id,)); enabled=False
+    else: c.execute("INSERT INTO vip_users(telegram_id,full_name,added_at) VALUES(?,?,?)",(telegram_id,s['full_name'],now_iso())); enabled=True
+    c.commit(); c.close(); return {"ok":True,"is_vip":enabled}
+
+@app.post("/api/admin/disciplines")
+def admin_discipline_create(payload:dict,x_telegram_init_data:str|None=Header(default=None)):
+    admin_auth(x_telegram_init_data); name=str(payload.get('name','')).strip(); emoji=str(payload.get('emoji','📚')).strip() or '📚'
+    if not name: raise HTTPException(400,"Название дисциплины не может быть пустым.")
+    c=db(); c.execute("INSERT INTO disciplines(name,emoji,active,textbooks_enabled) VALUES(?,?,1,1)",(name,emoji)); did=c.lastrowid; c.commit(); c.close(); return {"ok":True,"id":did}
+
+@app.patch("/api/admin/disciplines/{discipline_id}")
+def admin_discipline_update(discipline_id:int,payload:dict,x_telegram_init_data:str|None=Header(default=None)):
+    admin_auth(x_telegram_init_data); name=str(payload.get('name','')).strip(); emoji=str(payload.get('emoji','📚')).strip() or '📚'
+    if not name: raise HTTPException(400,"Название дисциплины не может быть пустым.")
+    c=db(); c.execute("UPDATE disciplines SET name=?,emoji=? WHERE id=?",(name,emoji,discipline_id)); c.commit(); c.close(); return {"ok":True}
+
+@app.delete("/api/admin/disciplines/{discipline_id}")
+def admin_discipline_delete(discipline_id:int,x_telegram_init_data:str|None=Header(default=None)):
+    admin_auth(x_telegram_init_data); c=db(); c.execute("UPDATE disciplines SET active=0 WHERE id=?",(discipline_id,)); c.commit(); c.close(); return {"ok":True}
+
+class BroadcastIn(BaseModel):
+    kind:str
+    text:str
+
+@app.post("/api/admin/broadcast")
+async def admin_broadcast(payload:BroadcastIn,x_telegram_init_data:str|None=Header(default=None)):
+    uid,_,_,_=admin_auth(x_telegram_init_data); text=payload.text.strip(); kind=payload.kind
+    if not text: raise HTTPException(400,"Текст уведомления пуст.")
+    labels={'important':'🚨 <b>Важная информация</b>','update':'🔄 <b>Обновление</b>','other':'📢 <b>Прочее уведомление</b>'}
+    columns={'update':'updates','other':'other'}
+    c=db()
+    if kind=='important': users=c.execute("SELECT telegram_id FROM students WHERE telegram_id IS NOT NULL").fetchall()
+    elif kind in columns: users=c.execute(f"SELECT s.telegram_id FROM students s LEFT JOIN notification_settings n ON n.telegram_id=s.telegram_id WHERE s.telegram_id IS NOT NULL AND COALESCE(n.{columns[kind]},1)=1").fetchall()
+    else: c.close(); raise HTTPException(400,"Неизвестный тип уведомления.")
+    c.close(); sent=0
+    async with httpx.AsyncClient(timeout=20) as client:
+        for u in users:
+            try:
+                r=await client.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage",data={'chat_id':u['telegram_id'],'text':labels[kind]+'\n\n'+text,'parse_mode':'HTML'})
+                if r.status_code<400 and r.json().get('ok'): sent+=1
+            except Exception: pass
+    return {"ok":True,"sent":sent,"total":len(users)}
 
 @app.get("/api/admin/schedule/{day}")
 def admin_schedule(day: str, x_telegram_init_data: str | None = Header(default=None)):
