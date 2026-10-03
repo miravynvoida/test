@@ -419,14 +419,19 @@ async def hw_item(c:CallbackQuery):
     txt=f"{h['emoji']} <b>{h['discipline']}</b>\n\n<b>📝 {title}</b>\n{task}\n\n📅 <b>Дата сдачи:</b> {h['due_date']}\n📤 <b>Опубликовано:</b> {h['published_date']}"
     if h['explanation']: txt+=f"\n\n💬 <b>Пояснение:</b>\n{h['explanation']}"
     kb=[[b("💡 Посмотреть ответ",f"hw:answer:{hid}")],[b("🔙 Назад в дисциплину",f"hw:back:{did}:{page}")]]
-    await c.answer(); await edit_or_answer(c,txt,ik(kb))
     cc=db(); media=cc.execute("SELECT * FROM homework_media WHERE homework_id=? ORDER BY id",(hid,)).fetchall(); cc.close()
+    # Telegram messages are ordered by send time: files first, then the action message.
+    try:
+        if c.message: await c.message.delete()
+    except Exception: pass
+    await c.answer()
     for x in media:
         try:
             if x['kind']=='photo': await c.bot.send_photo(c.from_user.id,x['file_id'],caption=x['caption'])
             elif x['kind']=='video': await c.bot.send_video(c.from_user.id,x['file_id'],caption=x['caption'])
             else: await c.bot.send_document(c.from_user.id,x['file_id'],caption=x['caption'])
         except Exception: pass
+    await show(c.bot,c.from_user.id,txt,ik(kb))
 
 @router.callback_query(F.data.startswith("hw:back:"))
 async def hw_back(c:CallbackQuery):
