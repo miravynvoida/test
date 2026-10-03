@@ -6,7 +6,7 @@
   <meta name="theme-color" content="#f6f7fb">
   <title>Электронный дневник v10</title>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
-  <link rel="stylesheet" href="/static/app.css">
+  <link rel="stylesheet" href="/static/app.css?v=11">
 </head>
 <body>
 <div id="app">
@@ -21,9 +21,10 @@
     <button data-page="homework">✓<span>ДЗ</span></button>
     <button data-page="grades">▣<span>Оценки</span></button>
     <button data-page="more">⋯<span>Ещё</span></button>
+    <button id="adminNavBtn" data-page="admin" hidden>🛠<span>Админ</span></button>
   </nav>
 </div>
 <div id="toast"></div><div id="modalRoot"></div>
-<script src="/static/app.js"></script>
+<script src="/static/app.js?v=11"></script>
 </body>
 </html>
